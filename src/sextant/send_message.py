@@ -39,7 +39,16 @@ def set_manager(manager: "SessionManager") -> None:  # noqa: F821
         "发送消息: to='项目ID'|'__user__', subject, body。\n"
         "权限审批: tool_name, input。"
     ),
-    input_schema={"*": dict},
+    input_schema={
+        "type": "object",
+        "properties": {
+            "to": {"type": "string", "description": "目标项目ID 或 __user__"},
+            "subject": {"type": "string"},
+            "body": {"type": "string"},
+            "tool_name": {"type": "string"},
+            "input": {"type": "object"},
+        },
+    },
 )
 async def send_message_handler(args: dict) -> dict:
     """MCP tool handler.  Delegates to SessionManager.route_message().
