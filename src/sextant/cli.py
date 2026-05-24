@@ -34,6 +34,16 @@ def main() -> None:
         default="sextant.yaml",
         help="Path to sextant.yaml (default: ./sextant.yaml)",
     )
+    chat_parser.add_argument(
+        "--continue", dest="continue_session",
+        action="store_true",
+        help="Continue the most recent session (default: True)",
+    )
+    chat_parser.add_argument(
+        "--resume", dest="resume",
+        nargs="?", const="__picker__",
+        help="Resume a specific session by ID, or show picker if no ID given",
+    )
 
     # sextant mailbox
     mailbox_parser = subparsers.add_parser("mailbox", help="View message history")
@@ -119,6 +129,16 @@ def _cmd_status(args) -> None:
 async def _cmd_chat(args) -> None:
     config = load_config(args.config)
 
+    # Resolve resume target
+    resume_id: str | None = None
+    if args.resume:
+        if args.resume == "__picker__":
+            resume_id = _pick_session(args.project)
+            if resume_id is None:
+                return
+        else:
+            resume_id = args.resume
+
     # Look up the project by ID or fall back to direct path
     project_id: str
     try:
@@ -128,7 +148,6 @@ async def _cmd_chat(args) -> None:
         path = Path(args.project).expanduser().resolve()
         if path.is_dir():
             project_id = path.name
-            # Synthesize a one-shot config entry so SessionManager sees it
             config.projects.append(ProjectConfig(
                 id=project_id,
                 directory=path,
@@ -138,4 +157,69 @@ async def _cmd_chat(args) -> None:
             print(f"错误: 项目 '{args.project}' 不存在，且路径 '{path}' 不是目录。")
             sys.exit(1)
 
-    await chat(config, project_id)
+    await chat(config, project_id, resume=resume_id)
+
+
+def _workspace_slug(project_dir: str | Path) -> str:
+    """Derive CC workspace slug from a project directory path."""
+    return "-" + str(Path(project_dir).expanduser().resolve()).replace("/", "-")
+
+
+def _pick_session(project_arg: str) -> str | None:
+    """Scan CC session store for a project and let user pick."""
+    from datetime import datetime
+
+    # Resolve project directory
+    proj_path = Path(project_arg).expanduser().resolve()
+    if not proj_path.is_dir():
+        try:
+            config = load_config("sextant.yaml")
+            proj = config.get_project(project_arg)
+            proj_path = Path(proj.directory).expanduser().resolve()
+        except (FileNotFoundError, KeyError):
+            print(f"找不到项目: {project_arg}")
+            return None
+
+    slug = _workspace_slug(proj_path)
+    sessions_dir = Path.home() / ".claude" / "projects" / slug
+    if not sessions_dir.is_dir():
+        print(f"没有找到会话记录: {sessions_dir}")
+        return None
+
+    # Collect sessions from JSONL files
+    sessions: list[dict] = []
+    for f in sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+        sid = f.stem
+        try:
+            with open(f) as fh:
+                first = fh.readline()
+                data = {"id": sid, "mtime": f.stat().st_mtime}
+                import json as _json
+                try:
+                    entry = _json.loads(first)
+                    data["first_prompt"] = str(entry.get("message", {}).get("content", ""))[:60]
+                except _json.JSONDecodeError:
+                    pass
+                sessions.append(data)
+        except (OSError, PermissionError):
+            pass
+
+    if not sessions:
+        print("没有找到会话记录")
+        return None
+
+    print(f"\n{'#':<4s} {'时间':<20s} {'开头':<62s}")
+    print("-" * 88)
+    for i, s in enumerate(sessions[:20], 1):
+        ts = datetime.fromtimestamp(s["mtime"]).strftime("%m-%d %H:%M:%S")
+        preview = s.get("first_prompt", "—")
+        print(f"{i:<4d} {ts:<20s} {preview:<62s}")
+
+    try:
+        choice = input(f"\n选择会话 (1-{min(len(sessions), 20)}, Enter=取消): ").strip()
+        if not choice:
+            return None
+        idx = int(choice) - 1
+        return sessions[idx]["id"]
+    except (ValueError, IndexError):
+        return None

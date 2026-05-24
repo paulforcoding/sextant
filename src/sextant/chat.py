@@ -30,19 +30,23 @@ if TYPE_CHECKING:
     from .config import ProjectConfig, SextantConfig
 
 
-async def chat(config: "SextantConfig", project_id: str) -> None:
+async def chat(config: "SextantConfig", project_id: str, *, resume: str | None = None) -> None:
     """Start an interactive REPL session with a project's CC agent.
 
     All agents are started when SessionManager enters context.  The user
     interacts with one project at a time; other agents wait in the
     background and respond to ``send_message`` calls.
 
-    Ctrl+C behavior:
-    - During input (idle): exits gracefully, all sessions preserved
-    - During agent response: interrupts the agent, stays in REPL
-    - During response, double Ctrl+C: force exits
+    Args:
+        config: Parsed sextant configuration.
+        project_id: Which project to interact with.
+        resume: Optional session UUID to resume.
     """
+    import time as _time
+
     project = config.get_project(project_id)
+    t_start = _time.time()
+    model = "—"
 
     print(f"sextant · {project.id}")
     print(f"项目目录: {project.directory}")
@@ -69,7 +73,7 @@ async def chat(config: "SextantConfig", project_id: str) -> None:
     loop.add_signal_handler(signal.SIGINT, _on_sigint)
 
     try:
-        async with SessionManager(config) as mgr:
+        async with SessionManager(config, resume=resume) as mgr:
             mgr_ref[0] = mgr
             set_manager(mgr)  # wire singleton for tool handler
             mgr.set_current_project(project.id)
@@ -78,6 +82,9 @@ async def chat(config: "SextantConfig", project_id: str) -> None:
                 streaming = False
                 force_quit = False
                 interrupted.clear()
+
+                # ---- STATUS BAR ----
+                _render_status(project.id, mgr, model, int(_time.time() - t_start))
 
                 # ---- INPUT PHASE ----
                 try:
@@ -108,7 +115,13 @@ async def chat(config: "SextantConfig", project_id: str) -> None:
                             print("\n  ⏸ 已中断")
                             break
 
+                        # Track model for status bar
+                        if hasattr(msg, "model") and msg.model:
+                            model = msg.model
+
                         _display_message(msg)
+                    # Post-response status update
+                    _render_status(project.id, mgr, model, int(_time.time() - t_start))
                 except Exception as e:
                     print(f"\n[错误] {e}", file=sys.stderr)
                 finally:
@@ -194,6 +207,25 @@ _GREY = "\033[37m"
 _RESET = "\033[0m"
 
 
+def _render_status(project_id: str, mgr, model: str, uptime_s: int) -> None:
+    """Render a one-line status bar at the bottom of the TUI."""
+    try:
+        client = mgr.get_client(project_id)
+        perm = client.options.permission_mode if hasattr(client.options, "permission_mode") else "?"
+    except Exception:
+        perm = "?"
+    mm, ss = divmod(uptime_s, 60)
+    hh, mm = divmod(mm, 60)
+    if hh:
+        uptime = f"{hh}h{mm:02d}m"
+    else:
+        uptime = f"{mm}m{ss:02d}s"
+    print(
+        f"\n  {_DIM}[{project_id}] {perm} · {model} · {uptime}{_RESET}",
+        flush=True,
+    )
+
+
 def _render_thinking(block) -> None:
     """Render a ThinkingBlock as dim grey indented lines."""
     text = block.thinking.strip()
@@ -266,9 +298,28 @@ async def _handle_command(cmd: str, mgr: SessionManager) -> None:
         print("命令:")
         print("  /help     — 显示帮助")
         print("  /info     — 显示当前 session 信息")
+        print("  /perm     — 切换权限模式 (default|acceptEdits|plan)")
+        print("  /model    — 切换模型")
         print("  /exit     — 退出")
         print("  /clear    — 清屏")
         print("  /stack    — 显示 call_stack")
+    elif command == "/perm":
+        mode = parts[1] if len(parts) > 1 else None
+        valid = {"default", "acceptEdits", "plan"}
+        if mode not in valid:
+            print(f"用法: /perm {{{'|'.join(valid)}}}")
+            return
+        client = mgr.get_client(mgr.current_project)
+        await client.set_permission_mode(mode)
+        print(f"权限模式 → {mode}")
+    elif command == "/model":
+        model_name = parts[1] if len(parts) > 1 else None
+        if not model_name:
+            print("用法: /model <名称>")
+            return
+        client = mgr.get_client(mgr.current_project)
+        await client.set_model(model_name)
+        print(f"模型 → {model_name}")
     elif command == "/info":
         pid = mgr.current_project
         try:

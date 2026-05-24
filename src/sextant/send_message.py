@@ -46,9 +46,16 @@ async def send_message_handler(args: dict) -> dict:
     """MCP tool handler.  Delegates to SessionManager.route_message()."""
     global _manager
 
-    to = args["to"]
-    subject = args["subject"]
-    body = args["body"]
+    # P5: debug log for permission_prompt_tool_name format discovery
+    import json as _json
+    print(
+        f"\n[DEBUG] send_message args: {_json.dumps(args, ensure_ascii=False)}",
+        flush=True,
+    )
+
+    to = args.get("to", "__user__")  # fallback: permission prompts may omit 'to'
+    subject = args.get("subject", args.get("tool_name", "?"))
+    body = args.get("body", _json.dumps(args.get("input", args), ensure_ascii=False))
 
     if _manager is None:
         return {

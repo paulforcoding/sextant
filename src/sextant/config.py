@@ -14,12 +14,14 @@ class ProjectConfig:
     id: str
     directory: Path
     allowed_tools: Optional[list[str]] = None
+    permission_mode: Optional[str] = None  # acceptEdits, default, plan, etc.
 
 
 @dataclass
 class SextantConfig:
     """Top-level sextant configuration."""
     projects: list[ProjectConfig] = field(default_factory=list)
+    permission_mode: Optional[str] = None  # global default: acceptEdits, default, plan
 
     def get_project(self, project_id: str) -> ProjectConfig:
         """Look up a project by ID. Raises KeyError if not found."""
@@ -66,5 +68,9 @@ def _parse_raw(raw: dict) -> SextantConfig:
             id=project_id,
             directory=dir_path,
             allowed_tools=entry.get("allowed_tools"),
+            permission_mode=entry.get("permission_mode"),
         ))
-    return SextantConfig(projects=projects)
+    return SextantConfig(
+        projects=projects,
+        permission_mode=raw.get("permission_mode"),
+    )

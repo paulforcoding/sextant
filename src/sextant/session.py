@@ -62,8 +62,9 @@ class SessionManager:
     an in-process MCP server with the ``send_message`` tool.
     """
 
-    def __init__(self, config: SextantConfig):
+    def __init__(self, config: SextantConfig, *, resume: str | None = None):
         self._config = config
+        self._resume = resume
         # project_id → ClaudeSDKClient
         self._clients: dict[str, ClaudeSDKClient] = {}
         # Stack of project_ids currently blocked on send_message.
@@ -108,9 +109,11 @@ class SessionManager:
         for project in self._config.projects:
             opts = ClaudeAgentOptions(
                 cwd=str(project.directory),
-                permission_mode="bypassPermissions",
+                permission_mode=project.permission_mode or config.permission_mode or "acceptEdits",
+                permission_prompt_tool_name="send_message",
                 setting_sources=["project"],
                 continue_conversation=True,
+                resume=self._resume,  # P5: session resume
                 env=_load_claude_env(),
                 mcp_servers={"sextant": mcp_server},
                 system_prompt={
