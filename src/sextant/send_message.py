@@ -35,17 +35,11 @@ def set_manager(manager: "SessionManager") -> None:  # noqa: F821
 @tool(
     name="send_message",
     description=(
-        "通用消息/权限网关。两种模式："
-        "1) send_message: to='项目ID' 或 '__user__' 发送消息并等待回复。"
-        "2) 权限审批: CC 权限系统调用此工具请求用户批准操作。"
+        "通用消息/权限网关。\n"
+        "发送消息: to='项目ID'|'__user__', subject, body。\n"
+        "权限审批: tool_name, input。"
     ),
-    input_schema={
-        "to": Optional[str],
-        "subject": Optional[str],
-        "body": Optional[str],
-        "tool_name": Optional[str],
-        "input": Optional[dict],
-    },
+    input_schema={"*": dict},
 )
 async def send_message_handler(args: dict) -> dict:
     """MCP tool handler.  Delegates to SessionManager.route_message().
