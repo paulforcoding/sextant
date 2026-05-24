@@ -9,12 +9,17 @@ import asyncio
 import os
 import signal
 import sys
+import time
 from typing import TYPE_CHECKING
 
 from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
+    ServerToolResultBlock,
+    ServerToolUseBlock,
     TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
     ToolUseBlock,
 )
 
@@ -130,18 +135,103 @@ async def _read_line(interrupted: asyncio.Event) -> str:
 
 
 def _display_message(msg) -> None:
-    """Render a single response message to stdout."""
+    """Render a single response message to stdout.
+
+    Handles all ``AssistantMessage.content`` block types:
+    - TextBlock          → inline text
+    - ThinkingBlock      → 💭 grey indented
+    - ToolUseBlock       → ⚙ tool call (records start time)
+    - ToolResultBlock    → ✓/❌ with duration (matched by tool_use_id)
+    - ServerToolUseBlock → 🔧 MCP tool call
+    - ServerToolResultBlock → ✓ with duration
+    """
     if isinstance(msg, AssistantMessage):
         for block in msg.content:
-            if isinstance(block, TextBlock) and block.text:
+            if isinstance(block, ThinkingBlock):
+                _render_thinking(block)
+            elif isinstance(block, TextBlock) and block.text:
                 print(block.text, end="", flush=True)
             elif isinstance(block, ToolUseBlock):
+                _tool_start_times[block.id] = time.time()
                 desc = _tool_description(block.name, block.input or {})
                 print(f"\n  ⚙ {desc}", end="", flush=True)
+            elif isinstance(block, ToolResultBlock):
+                duration = _pop_duration(block.tool_use_id)
+                if block.is_error:
+                    print(f"\n     ❌{duration}")
+                else:
+                    print(f"\n     ✓{duration}")
+            elif isinstance(block, ServerToolUseBlock):
+                _tool_start_times[f"srv_{block.id}"] = time.time()
+                desc = _server_tool_description(block.name, block.input or {})
+                print(f"\n  🔧 {desc}", end="", flush=True)
+            elif isinstance(block, ServerToolResultBlock):
+                duration = _pop_duration(f"srv_{block.tool_use_id}")
+                print(f"\n     ✓{duration}")
     elif isinstance(msg, ResultMessage):
         print()
+        # Warn about orphaned tool timers
+        if _tool_start_times:
+            print(
+                f"  ⚠ {len(_tool_start_times)} tool(s) without result",
+                file=sys.stderr,
+            )
+            _tool_start_times.clear()
         if msg.total_cost_usd is not None:
             print(f"  ── ${msg.total_cost_usd:.4f} · {msg.stop_reason or 'done'} ──")
+
+
+# ------------------------------------------------------------------
+# Rendering helpers (P4-1 / P4-2)
+# ------------------------------------------------------------------
+
+# tool_use_id → wall-clock start (for duration display)
+_tool_start_times: dict[str, float] = {}
+
+# ANSI escape
+_DIM = "\033[2m"
+_GREY = "\033[37m"
+_RESET = "\033[0m"
+
+
+def _render_thinking(block) -> None:
+    """Render a ThinkingBlock as dim grey indented lines."""
+    text = block.thinking.strip()
+    if not text:
+        return
+    for line in text.split("\n"):
+        print(f"\n  {_DIM}{_GREY}💭 {line}{_RESET}", end="", flush=True)
+    print()
+
+
+def _pop_duration(tool_use_id: str) -> str:
+    """Pop the start time for *tool_use_id* and return a formatted duration string."""
+    start = _tool_start_times.pop(tool_use_id, None)
+    if start is not None:
+        return f" [{time.time() - start:.1f}s]"
+    return ""
+
+
+def _server_tool_description(name: str, inp: dict) -> str:
+    """Human-readable description for a server-side (MCP) tool call."""
+    if name == "web_search":
+        return f"🔍 {inp.get('searchTerm', inp.get('query', '?'))}"
+    if name == "web_fetch":
+        return f"📄 {inp.get('url', '?')}"
+    if name == "bash_code_execution":
+        return f"$ {str(inp.get('command', ''))[:60]}"
+    if name == "code_execution":
+        return f"💻 {str(inp.get('code', ''))[:40]}…"
+    if name == "text_editor_code_execution":
+        return f"✏️ {str(inp.get('command', ''))[:60]}"
+    if name == "tool_search_tool_regex":
+        return f"🔎 regex: {inp.get('pattern', '?')}"
+    if name == "tool_search_tool_bm25":
+        return f"🔎 bm25: {inp.get('pattern', '?')}"
+    if name == "advisor":
+        return "🤔 advisor"
+    # Generic fallback
+    return f"{name}: {str(inp)[:60]}"
 
 
 def _tool_description(name: str, inp: dict) -> str:

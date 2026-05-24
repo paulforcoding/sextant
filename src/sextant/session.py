@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -178,6 +179,7 @@ class SessionManager:
 
         # --- normal injection ---
         self._call_stack.append(from_id)
+        t0 = time.time()
         try:
             prompt = (
                 f"📬 来自 **{from_id}** 的消息\n\n"
@@ -202,9 +204,14 @@ class SessionManager:
                     pass  # end of stream
 
             reply_text = "".join(parts).strip() or "(目标 Agent 无文本输出)"
+            elapsed = time.time() - t0
+            # P4-3: show reply status with duration
+            print(f"\n     ✓ {to} 已回复 [{elapsed:.1f}s]", flush=True)
             return {"reply": reply_text, "from": to}
 
         except Exception as exc:
+            elapsed = time.time() - t0
+            print(f"\n     ❌ {to} [{elapsed:.1f}s]", flush=True)
             return {"reply": f"(错误: {exc})", "from": "system"}
         finally:
             self._call_stack.pop()
