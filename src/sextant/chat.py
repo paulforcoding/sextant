@@ -12,6 +12,13 @@ import sys
 import time
 from typing import TYPE_CHECKING
 
+# Ensure line-editing (readline/libedit) is initialized, even when
+# input() runs in a background thread via run_in_executor.
+try:
+    import readline  # noqa: F401
+except ImportError:
+    pass
+
 from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
