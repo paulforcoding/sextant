@@ -48,6 +48,7 @@ async def chat(config: "SextantConfig", project_id: str) -> None:
     loop = asyncio.get_running_loop()
     interrupted = asyncio.Event()
     force_quit = False
+    mgr_ref: list[SessionManager | None] = [None]  # mutable ref for signal handler
 
     def _on_sigint() -> None:
         nonlocal force_quit
@@ -56,11 +57,15 @@ async def chat(config: "SextantConfig", project_id: str) -> None:
             os._exit(1)
         force_quit = True
         interrupted.set()
+        # Also cancel any pending __user__ prompt
+        if mgr_ref[0] is not None:
+            mgr_ref[0].cancel_event.set()
 
     loop.add_signal_handler(signal.SIGINT, _on_sigint)
 
     try:
         async with SessionManager(config) as mgr:
+            mgr_ref[0] = mgr
             set_manager(mgr)  # wire singleton for tool handler
             mgr.set_current_project(project.id)
 

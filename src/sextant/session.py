@@ -6,6 +6,7 @@ in-process MCP server that provides the ``send_message`` tool.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -68,6 +69,8 @@ class SessionManager:
         self._call_stack: list[str] = []
         # Currently active project (for send_message to know its caller).
         self._current_project: str | None = None
+        # Set by the REPL to cancel a __user__ prompt (Ctrl+C).
+        self.cancel_event: asyncio.Event = asyncio.Event()
 
     # -- public ----------------------------------------------------
 
@@ -162,7 +165,7 @@ class SessionManager:
         - ``__user__``: defers to Phase 3 (returns a placeholder for now).
         """
         if to == "__user__":
-            return {"reply": "(用户未回复 — __user__ 待 Phase 3)", "from": "__user__"}
+            return await self._prompt_user(from_id, subject, body)
 
         if to not in self._clients:
             return {"reply": f"错误: 项目 '{to}' 不存在", "from": "system"}
@@ -205,6 +208,45 @@ class SessionManager:
             return {"reply": f"(错误: {exc})", "from": "system"}
         finally:
             self._call_stack.pop()
+
+    # -- __user__ prompt (Phase 3) ----------------------------------
+
+    async def _prompt_user(self, from_id: str, subject: str, body: str) -> dict:
+        """Display a prompt to the human user and wait for their reply.
+
+        Races ``cancel_event`` against the input future so Ctrl+C skips
+        gracefully instead of leaving the REPL stuck.
+        """
+        # Print the prompt to stdout (won't interleave with streaming
+        # because the agent stream is paused while this tool call is
+        # in-flight).
+        print(flush=True)
+        print("─" * 50, flush=True)
+        print(f"🤔 **{from_id}** 想知道：", flush=True)
+        print(f"   {subject}", flush=True)
+        print(f"   {body}", flush=True)
+        print("─" * 50, flush=True)
+
+        self.cancel_event.clear()
+        loop = asyncio.get_running_loop()
+        input_future = loop.run_in_executor(None, lambda: input("> "))
+
+        done, _pending = await asyncio.wait(
+            [input_future, loop.create_task(self.cancel_event.wait())],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if input_future in done and not self.cancel_event.is_set():
+            try:
+                reply = input_future.result()
+                return {"reply": reply, "from": "__user__"}
+            except EOFError:
+                return {"reply": "(用户未回复)", "from": "__user__"}
+        else:
+            # Cancelled (Ctrl+C)
+            input_future.cancel()
+            print("\n  ⏸ (用户跳过)", flush=True)
+            return {"reply": "(用户未回复)", "from": "__user__"}
 
 
 # ------------------------------------------------------------------
