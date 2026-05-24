@@ -1,8 +1,8 @@
 # sextant — 产品需求文档 (PRD)
 
-> **版本**: 1.1  
+> **版本**: 1.2  
 > **日期**: 2026-05-24  
-> **状态**: Draft  
+> **状态**: Phase 1-3 已完成，Phase 4 进行中  
 > **作者**: ZP & 墨鱼  
 
 ---
@@ -24,9 +24,10 @@
 13. [会话管理](#13-会话管理)
 14. [并发与递归控制](#14-并发与递归控制)
 15. [错误处理](#15-错误处理)
-16. [实现计划](#16-实现计划)
-17. [开放问题与风险](#17-开放问题与风险)
-18. [附录](#18-附录)
+16. [开发进度](#16-开发进度)
+17. [实现计划](#17-实现计划)
+18. [开放问题与风险](#18-开放问题与风险)
+19. [附录](#19-附录)
 
 ---
 
@@ -913,38 +914,73 @@ sextant 的设计目标：Agent 间消息传递不能丢。
 
 ---
 
-## 16. 实现计划
+## 16. 开发进度
 
-### 16.1 阶段划分
+### 16.1 Phase 1：单 session + REPL ✅
 
-**Phase 1：单 session + REPL**（预估：4 小时）
+**完成日期**: 2026-05-24  
+**Commit**: `c6aaebf`
 
-- 实现 `session.py`：创建单个 `ClaudeSDKClient`
-- 实现 `chat.py`：最简 REPL（输入 → query → 输出）
-- 实现 `cli.py`：`sextant start` + `sextant chat`
-- 验证：`sextant chat acp` 能正常和 CC Agent 对话
+交付：
+- `session.py`：`ClaudeSDKClient` 生命周期管理
+- `chat.py`：REPL 交互循环（输入 → query → 流式输出）
+- `cli.py`：`sextant chat <project>` 入口
+- Ctrl+C 退出方案：`signal handler + os._exit(0)` 绕过 `input()` 的非 daemon 线程卡死问题
 
-**Phase 2：同步 send_message**（预估：4 小时）
+关键踩坑：
+- `PermissionMode` / `SettingSource` 是 `Literal` 非枚举
+- `query()` 是 async 方法
+- `StreamEvent` 在 DeepSeek 后端下**不触发**
+- SDK 不自动读取 settings.json 的 `env`
 
-- 实现 `send_message.py`：单一 MCP tool + 同步路由
-- 实现递归防护（`_call_stack`）
-- 多 session 管理（`session.py` 扩展）
-- 验证：acp → send_message(to="ncp") → ncp 回复 → acp 收到
+### 16.2 Phase 2：多 Agent + send_message ✅
 
-**Phase 3：__user__ 特殊收件人**（预估：4 小时）
+**完成日期**: 2026-05-24  
+**Commit**: `ad07c0e`
 
-- 实现 `chat.py` 的 `repl_ask_user()`：阻塞等待用户输入
-- 实现 `send_message.py` 的 `to="__user__"` 分支
-- 验证：CC 调用 send_message(to="__user__") → REPL 阻塞 → 用户回复 → CC 继续
+交付：
+- `SessionManager`：管理多个 `ClaudeSDKClient`，生命周期统一
+- `send_message.py`：唯一 MCP tool（`@tool` 装饰器），进程内 SDK server
+- 同步路由：`route_message()` → 注入目标 → 收集文本输出 → 返回
+- `_call_stack` 递归防护：`to in _call_stack` 时直接返回
+- System prompt 自动注入项目列表
 
-**Phase 4：打磨 + E2E**（预估：4 小时）
+E2E 验证通过：acp → send_message(to="ncp") → ncp 回复 → acp 收到。
 
-- 错误处理完善
-- 日志 + mailbox 审计
-- acp/ncp/xcp 三个项目完整场景验证
-- 配置文件解析
+### 16.3 Phase 3：__user__ 真人交互 ✅
 
-### 16.2 技术验证点
+**完成日期**: 2026-05-24  
+**Commit**: `3f09c63`（⚠️ 未 push，GitHub 超时）
+
+交付：
+- `_prompt_user()`：显示提示 → `asyncio.wait()` race `input()` vs `cancel_event` → 返回回复
+- `cancel_event`：Ctrl+C 跳过 `__user__` 提问，返回 "(用户未回复)"
+- `chat.py` 信号处理器改造：`mgr_ref` 可变容器传递 manager 引用
+
+E2E 验证通过：acp → send_message(to="__user__") → mock 用户输入 → acp 继续。
+
+### 16.4 Phase 4：TUI 思考可见化（进行中）
+
+详见 [第 17.4 节](#174-phase-4tui-思考可见化--打磨预估8-小时)。
+
+---
+
+## 17. 实现计划
+
+### 17.1 阶段划分
+
+**Phase 1：单 session + REPL** ✅
+Commits: `c6aaebf`。详见 [第 16.1 节](#161-phase-1单-session--repl-)。
+
+**Phase 2：同步 send_message** ✅
+Commits: `ad07c0e`。详见 [第 16.2 节](#162-phase-2多-agent--send_message-)。
+
+**Phase 3：__user__ 特殊收件人** ✅
+Commits: `3f09c63`（⚠️ 本地未 push）。详见 [第 16.3 节](#163-phase-3__user__-真人交互-)。
+
+**Phase 4：TUI 思考可见化 + 打磨**（预估：8 小时）
+
+### 17.2 技术验证点（已全部验证）
 
 在进入编码前需先验证：
 
@@ -953,25 +989,185 @@ sextant 的设计目标：Agent 间消息传递不能丢。
 3. **`query()` + `receive_response()` 是否能稳定接收流式输出**？
 4. **`continue_conversation=True` 的会话文件路径和格式**？
 
+全部已验证通过（Phase 1-3 开发中确认）。
+
+### 17.3 新增踩坑记录（Phase 2-3）
+
+| 假设 | 实际 |
+|------|------|
+| `get_server_info()` 返回对象（`.session_id`） | 返回 dict，无 `session_id` 字段 |
+| `ThreadPoolExecutor` 线程随 asyncio 退出 | `input()` 的非 daemon 线程会导致进程挂死 → 需 `os._exit(0)` |
+| 进程内 MCP server 的 tool handler 可同步调用 | handler 是 async，可 await 其他 client 的 query() |
+| `asyncio.Event` 在 signal handler 中设置安全 | ✅ 安全，`loop.add_signal_handler` 将其作为回调调度 |
+
 ---
 
-## 17. 开放问题与风险
+### 17.4 Phase 4：TUI 思考可见化 + 打磨
+
+#### 17.4.1 问题陈述
+
+**当前 TUI 是"黑盒"**：用户输入 prompt 后，看到的是：
+
+```
+sextant · acp
+> 帮我改 proto 协议，通知 ncp
+
+[空白等待 30+ 秒...]
+[acp] 已完成修改。
+```
+
+这 30 秒里发生了什么？agent 在思考？在调工具？在等 ncp 回复？还是卡死了？用户只能干等。
+
+**核心需求**：让 agent 的每一步思考/操作都**实时可见**，像 CC 原生 TUI 那样。
+
+#### 17.4.2 目标体验
+
+```
+sextant · acp
+> 帮我改 proto 协议，通知 ncp
+  💭 用户要我改 proto 协议并通知 ncp。先看当前协议定义...         ← ThinkingBlock
+  ⚙ Reading /proto/auth.proto                       [0.3s]
+  💭 Token 需要改成 TokenStruct。确认改动范围...                ← ThinkingBlock
+  ⚙ Editing /proto/auth.proto                        [1.2s]
+  💭 改完了，现在通知 ncp。                                      ← ThinkingBlock
+  📬 → ncp: 同步协议变更                              [等待中...]
+  📬  ncp 已回复: 修改完成                            [3.8s]
+  💭 ncp 确认修改完成，向用户汇报。                               ← ThinkingBlock
+[acp] proto 协议已更新，ncp 已同步完成 ✓
+  ── $0.0234 · end_turn ──
+```
+
+**关键改进**：
+- `💭` 前缀显示推理过程（缩进、灰色）
+- `⚙` 工具调用显示耗时
+- `📬` agent 间通信显示状态 + 耗时
+- 用户不再"盯空白屏幕"
+
+#### 17.4.3 技术方案
+
+**SDK 类型支持**（已查证）：
+
+```python
+# AssistantMessage.content 中的 block 类型：
+TextBlock          # 普通文本
+ThinkingBlock      # 推理过程 (thinking + signature 字段)
+ToolUseBlock       # 工具调用
+ToolResultBlock    # 工具结果
+ServerToolUseBlock # MCP tool 调用
+ServerToolResultBlock  # MCP tool 结果
+```
+
+**实现步骤**：
+
+**Task P4-1：`ThinkingBlock` 渲染**（2h）
+
+修改 `chat.py` 的 `_display_message`：
+
+```python
+def _display_message(msg):
+    if isinstance(msg, AssistantMessage):
+        for block in msg.content:
+            if isinstance(block, ThinkingBlock):
+                # 灰色缩进显示推理过程
+                for line in block.thinking.strip().split("\n"):
+                    print(f"\x1b[90m  💭 {line}\x1b[0m", flush=True)
+            elif isinstance(block, TextBlock):
+                print(block.text, end="", flush=True)
+            # ... 其他 block 处理
+```
+
+⚠️ `ThinkingBlock` 只在**推理模型**（如 Claude Opus extended thinking、DeepSeek-R1）下出现。普通模型跳过此渲染。
+
+**Task P4-2：工具调用耗时显示**（1.5h）
+
+当前 `_tool_description` 只显示工具名。改为带时间戳：
+
+```python
+_tool_starts: dict[str, float] = {}  # tool_use_id → start_time
+
+# 在 ToolUseBlock 时记录起始时间
+# 在 ToolResultBlock 时计算耗时显示
+# 显示格式: ⚙ Reading /proto/auth.proto  [0.3s] ✓
+```
+
+**Task P4-3：Agent 间通信状态**（1h）
+
+`send_message` 的 `route_message()` 中：
+- 开始注入时：`print(f"  📬 → {to}: {subject}  [等待中...]", flush=True)`
+- 收到回复时：`print(f"  📬  {to} 已回复  [{elapsed:.1f}s]", flush=True)`
+
+同时在 `_display_message` 中对 `ServerToolUseBlock(name="send_message")` 做特殊渲染。
+
+**Task P4-4：mailbox 持久化**（1.5h）
+
+新建 `mailbox.py`：
+- `save_message(from_id, to, subject, body, reply)` → 写 JSON 到 `~/.sextant/mailbox/{project_id}/`
+- 每条消息包含：timestamp, from_id, to, subject, body, reply, elapsed_ms
+- 文件按日期分片：`YYYY-MM-DD.jsonl`
+
+新增 CLI 命令：`sextant mailbox <project>` — 展示历史消息。
+
+**Task P4-5：错误处理增强**（1h）
+
+- `route_message`: 目标 agent 异常时，不做崩溃处理，返回结构化错误
+- `SessionManager.__aenter__`: 某个 agent 启动失败不影响其他 agent
+- Agent 崩溃检测：`receive_response()` 异常时标记 agent 为 `unavailable`，`send_message` 返回友好错误
+- 增加 `sextant status` 命令：显示各 agent 状态（running/unavailable/crashed）
+
+**Task P4-6：完整 E2E 场景测试**（1h）
+
+创建三项目测试环境：
+```yaml
+projects:
+  - id: acp    # 协议仓库
+  - id: ncp    # 服务端（Python）
+  - id: xcp    # 客户端（Rust）
+```
+
+测试场景（按 PRD 第 11 章）：
+1. acp 改协议 → 通知 ncp → ncp 有疑问 → 问 xcp → xcp 回复 → ncp 完成 → acp 汇报
+2. Agent 间递归防护：A→B→C→A 场景
+3. `__user__` 升级：C 拿不到有效回答时向用户求助
+
+#### 17.4.4 Phase 4 优先级
+
+| 优先级 | 任务 | 理由 |
+|--------|------|------|
+| 🔴 P0 | P4-1 ThinkingBlock 渲染 | ZP 核心痛点：看不到思考过程 |
+| 🔴 P0 | P4-2 工具耗时 | 判断 agent 是否卡死的直接信号 |
+| 🟡 P1 | P4-3 Agent 通信状态 | send_message 等待时最焦虑 |
+| 🟢 P2 | P4-4 Mailbox | 辅助功能，不影响交互体验 |
+| 🟢 P2 | P4-5 错误处理 | 早期阶段 agent crash 概率低 |
+| 🟢 P2 | P4-6 E2E 测试 | 需要三项目环境，先做功能再做测试 |
+
+**建议开发顺序**：P4-1 → P4-2 → P4-3 →（此时 ZP 可以开始实际使用）→ P4-4/5/6
+
+---
+
+## 18. 开放问题与风险
+
+| # | 问题 | 风险等级 | 状态 | 结论 |
+|---|------|----------|------|------|
+| Q1 | `bypassPermissions` 下 Agent 是否执行危险操作？ | 中 | ⚠️ 部分缓解 | 进程在本地运行，不暴露网络。初期建议限制 `allowed_tools` |
+| Q2 | `query()` 调用期间 SDK 内部是否有并发保护？ | 低 | ✅ 已验证 | 串行模型，不存在并发访问 |
+| Q3 | 3-4 个 CC Agent 子进程的内存开销？ | 低 | ✅ 已验证 | 实测 2 agent ≈ 400MB，符合预期 |
+| Q4 | `continue_conversation=True` 的持久化路径？ | 中 | ✅ 已验证 | SDK 自动管理，重启后恢复成功 |
+| Q5 | 长时间 `send_message` 时用户能否 Ctrl+C？ | 高 | ⚠️ 待验证 | Phase 4 通过耗时显示提供反馈；interrupt 机制待验证 |
+| Q6 | Agent 会不会填错 `to` 参数？ | 低 | ✅ 已验证 | system_prompt 注入 + 项目列表，E2E 测试中从未填错 |
+| Q7 | `send_message` 等待时 SDK 是否有超时？ | 中 | ⚠️ 待验证 | 实测未见超时。Phase 4 建议加超时保护 |
+
+**Phase 4 新增风险**：
 
 | # | 问题 | 风险等级 | 缓解措施 |
 |---|------|----------|----------|
-| Q1 | `bypassPermissions` 下 Agent 是否执行危险操作？ | 中 | 初期限制 `allowed_tools` 为只读 |
-| Q2 | `query()` 调用期间 SDK 内部是否有并发保护？ | 低 | 串行模型下不会并发访问同一 client |
-| Q3 | 3-4 个 CC Agent 子进程的内存开销？ | 低 | Node 进程 ~200MB/个，3-4 个 = 600-800MB，可接受 |
-| Q4 | `continue_conversation=True` 的持久化路径？重启后恢复失败怎么办？ | 中 | 需实测；降级方案：创建新会话 |
-| Q5 | 长时间 `send_message` 的用户体验：xcp 处理 3 分钟，用户能否 `Ctrl+C`？下次 resume 是什么状态？ | 高 | 需要验证 CC SDK 的 interrupt 支持；可能需要异步化 P4 |
-| Q6 | `current_project_id()` 通过 system_prompt 注入是否可靠？Agent 会不会填错 `to`？ | 低 | prompt 中已明确告知项目身份 |
-| Q7 | Agent 在等待 `send_message` 回复时，SDK 内部是否有时钟或超时？ | 中 | 需实测 CC SDK 的超时行为 |
+| Q8 | `ThinkingBlock` 在 DeepSeek v4（非推理模型）下不出现 | 低 | 实现上不做假设，有则渲染、无则跳过 |
+| Q9 | `ToolResultBlock` 的 `tool_use_id` 能否可靠关联到 `ToolUseBlock` | 低 | SDK 类型已包含此字段，待实测确认 |
 
 ---
 
-## 18. 附录
+## 19. 附录
 
-### 18.1 术语表
+### 19.1 术语表
 
 | 术语 | 定义 |
 |------|------|
@@ -987,7 +1183,7 @@ sextant 的设计目标：Agent 间消息传递不能丢。
 | **`__user__`** | 特殊收件人标识，代表真人用户 |
 | **send_message** | 唯一的 MCP tool，用于 Agent 间同步消息传递 |
 
-### 18.2 相关文档
+### 19.2 相关文档
 
 | 文档 | 路径 | 描述 |
 |------|------|------|
@@ -998,14 +1194,15 @@ sextant 的设计目标：Agent 间消息传递不能丢。
 | SDK 限制 | `.aireports/20260524_sdk_limitations.md` | MCP SDK notification 限制（已绕过） |
 | 最终设计 v4 | `.aireports/20260524_final_design_v4.md` | 最终架构设计（本文档的详细技术版） |
 
-### 18.3 变更记录
+### 19.3 变更记录
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | 1.0 | 2026-05-24 | 初始 PRD，基于 final_design_v4.md |
 | 1.1 | 2026-05-24 | 新增第11章「端到端协作场景」；章节号全部后移 |
+| 1.2 | 2026-05-24 | Phase 1-3 完成；新增第16章「开发进度」；Phase 4 详细规格（TUI 思考可见化 + 6 个 task）；开放问题更新（Q2-4,Q6 ✅，Q5,Q7 ⚠️，新增 Q8-9）；SDK 踩坑补充 |
 
-### 18.4 SDK 参考文档
+### 19.4 SDK 参考文档
 
 | 来源 | 链接 | 内容 |
 |------|------|------|
