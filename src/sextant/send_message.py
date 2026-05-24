@@ -32,9 +32,8 @@ def set_manager(manager: "SessionManager") -> None:  # noqa: F821
 @tool(
     name="send_message",
     description=(
-        "通用消息/权限网关。\n"
-        "发送消息: to='项目ID'|'__user__', subject, body。\n"
-        "权限审批: tool_name, input。"
+        "向其他项目或用户发送消息并等待回复。\n"
+        "用法: to='项目ID'|'__user__', subject, body。"
     ),
     input_schema={
         "type": "object",
@@ -42,34 +41,17 @@ def set_manager(manager: "SessionManager") -> None:  # noqa: F821
             "to": {"type": "string", "description": "目标项目ID 或 __user__"},
             "subject": {"type": "string"},
             "body": {"type": "string"},
-            "tool_name": {"type": "string"},
-            "input": {"type": "object"},
         },
+        "required": ["to", "subject", "body"],
     },
 )
 async def send_message_handler(args: dict) -> dict:
-    """MCP tool handler.  Delegates to SessionManager.route_message().
-
-    Also handles CC permission requests (routed via
-    ``permission_prompt_tool_name``).
-    """
+    """MCP tool handler.  Delegates to SessionManager.route_message()."""
     global _manager
 
-    # Debug logging (opt-in via SEXTANT_DEBUG=1)
-    import os as _os, json as _json
-    if _os.environ.get("SEXTANT_DEBUG"):
-        import sys as _sys
-        _sys.stderr.write(f"[DEBUG] send_message: {_json.dumps(args, ensure_ascii=False)}\n")
-        _sys.stderr.flush()
-
-    # ── detect permission request ──────────────────────────────────
-    if "tool_name" in args and "to" not in args:
-        return await _handle_permission_request(args)
-
-    # ── normal send_message ────────────────────────────────────────
-    to = args.get("to", "__user__")
-    subject = args.get("subject", "?")
-    body = args.get("body", "")
+    to = args["to"]
+    subject = args["subject"]
+    body = args["body"]
 
     if _manager is None:
         return {
@@ -92,48 +74,6 @@ async def send_message_handler(args: dict) -> dict:
         "content": [{"type": "text", "text": f"{result['reply']}"}],
         "reply": result["reply"],
         "from": result["from"],
-    }
-
-
-# ------------------------------------------------------------------
-# Permission request handler (P5)
-# ------------------------------------------------------------------
-
-
-async def _handle_permission_request(args: dict) -> dict:
-    """Handle a CC permission request routed through our tool.
-
-    CC calls this tool (via ``--permission-prompt-tool``) with:
-        {"tool_name": "Bash", "input": {"command": "rm ..."}, ...}
-
-    We block and ask the human user for approval.
-    """
-    global _manager
-
-    if _manager is None:
-        return {"reply": "(无法处理: SessionManager 未初始化)", "from": "system"}
-
-    tool_name = args.get("tool_name", "?")
-    tool_input = args.get("input", {})
-
-    # Format the permission prompt for the user
-    import json as _json
-    subject = f"允许 {tool_name}?"
-    body = f"{tool_name}: {_json.dumps(tool_input, ensure_ascii=False)[:300]}"
-
-    from_id = _manager.current_project or "?"
-    result = await _manager.route_message(
-        from_id=from_id, to="__user__", subject=subject, body=body
-    )
-
-    # Interpret user response
-    reply = result.get("reply", "").strip().lower()
-    if reply in ("y", "yes", "是", "允许", "可以", "ok", "好"):
-        # CC expects a clean MCP response to proceed
-        return {"content": [{"type": "text", "text": "ok"}]}
-    return {
-        "content": [{"type": "text", "text": "用户拒绝"}],
-        "isError": True,
     }
 
 

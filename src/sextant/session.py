@@ -20,6 +20,12 @@ from claude_agent_sdk import (
     SystemMessage,
     create_sdk_mcp_server,
 )
+from claude_agent_sdk.types import (
+    HookMatcher,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+)
 
 from .mailbox import Mailbox
 
@@ -105,6 +111,35 @@ class SessionManager:
             tools=[send_message_tool],
         )
 
+        # ── canUseTool: intercept ALL tool calls for user approval ──
+        manager_ref = self  # closure capture
+
+        async def can_use_tool(
+            tool_name: str, input_data: dict, context: ToolPermissionContext
+        ) -> PermissionResultAllow | PermissionResultDeny:
+            # Always allow our own MCP tool
+            if tool_name == "send_message":
+                return PermissionResultAllow(updated_input=input_data)
+
+            # Handle CC asking the user questions
+            if tool_name == "AskUserQuestion":
+                return await manager_ref._handle_ask_user_question(input_data)
+
+            # All other tools → ask user
+            desc = _format_tool_for_user(tool_name, input_data)
+            result = await manager_ref._prompt_user(
+                from_id=manager_ref._current_project or "?",
+                subject=f"允许 {tool_name}?",
+                body=desc,
+            )
+            reply = result.get("reply", "").strip().lower()
+            if reply in ("y", "yes", "是", "允许", "可以", "ok", "好"):
+                return PermissionResultAllow(updated_input=input_data)
+            return PermissionResultDeny(message=f"用户拒绝了 {tool_name}")
+
+        async def dummy_hook(input_data, tool_use_id, context):
+            return {"continue_": True}
+
         # 2. Create one SDK client per project
         for project in self._config.projects:
             opts = ClaudeAgentOptions(
@@ -115,6 +150,8 @@ class SessionManager:
                 resume=self._resume,  # P5: session resume
                 env=_load_claude_env(),
                 mcp_servers={"sextant": mcp_server},
+                can_use_tool=can_use_tool,
+                hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[dummy_hook])]},
                 system_prompt={
                     "type": "preset",
                     "preset": "claude_code",
@@ -275,10 +312,80 @@ class SessionManager:
             print("\n  ⏸ (用户跳过)", flush=True)
             return {"reply": "(用户未回复)", "from": "__user__"}
 
+    # -- AskUserQuestion handler (for canUseTool) --------------------
+
+    async def _handle_ask_user_question(
+        self, input_data: dict
+    ) -> PermissionResultAllow:
+        """Handle CC's AskUserQuestion tool via canUseTool.
+
+        Formats each question with its options and prompts the user.
+        Returns PermissionResultAllow with answers.
+        """
+        questions = input_data.get("questions", [])
+        answers: dict[str, str] = {}
+
+        for q in questions:
+            header = q.get("header", "?")
+            question = q.get("question", "?")
+            options = q.get("options", [])
+
+            lines = [f"{header}: {question}", ""]
+            for i, opt in enumerate(options, 1):
+                desc = opt.get("description", "")
+                lines.append(f"  {i}. {opt['label']}" + (f" — {desc}" if desc else ""))
+
+            result = await self._prompt_user(
+                from_id=self._current_project or "?",
+                subject=f"🤔 {header}",
+                body="\n".join(lines),
+            )
+            reply = result.get("reply", "").strip()
+            # Try numeric selection first, fall back to free-text
+            try:
+                idx = int(reply) - 1
+                if 0 <= idx < len(options):
+                    answers[question] = options[idx]["label"]
+                else:
+                    answers[question] = reply
+            except ValueError:
+                answers[question] = reply
+
+        return PermissionResultAllow(
+            updated_input={"questions": questions, "answers": answers}
+        )
+
 
 # ------------------------------------------------------------------
 # helpers
 # ------------------------------------------------------------------
+
+def _format_tool_for_user(tool_name: str, input_data: dict) -> str:
+    """Format a tool call for user-facing permission prompt."""
+    if tool_name == "Bash":
+        cmd = input_data.get("command", "?")
+        desc = input_data.get("description", "")
+        return f"$ {cmd}" + (f"\n  {desc}" if desc else "")
+    if tool_name == "Write":
+        content = str(input_data.get("content", ""))[:200]
+        return f"📄 {input_data.get('file_path', '?')}\n  {content}"
+    if tool_name == "Edit":
+        old_s = str(input_data.get("old_string", ""))[:100]
+        new_s = str(input_data.get("new_string", ""))[:100]
+        return f"✏️ {input_data.get('file_path', '?')}\n  -{old_s}\n  +{new_s}"
+    if tool_name == "Read":
+        return f"📖 {input_data.get('file_path', '?')}"
+    if tool_name == "Grep":
+        return f"🔍 {input_data.get('pattern', '?')}"
+    if tool_name == "Glob":
+        return f"🔎 {input_data.get('pattern', '?')}"
+    if tool_name == "WebSearch":
+        return f"🌐 {input_data.get('query', '?')}"
+    if tool_name == "WebFetch":
+        return f"📄 {input_data.get('url', '?')}"
+    import json as _json
+    return f"{tool_name}: {_json.dumps(input_data, ensure_ascii=False)[:200]}"
+
 
 def _build_system_prompt(project_id: str, projects) -> str:
     """Build the appended system prompt for a project's agent."""
