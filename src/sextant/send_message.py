@@ -133,15 +133,11 @@ async def _handle_permission_request(args: dict) -> dict:
     # Interpret user response
     reply = result.get("reply", "").strip().lower()
     if reply in ("y", "yes", "是", "允许", "可以", "ok", "好"):
-        return {
-            "content": [{"type": "text", "text": "allowed"}],
-            "is_error": False,
-            "allowed": True,
-        }
+        # CC expects a clean MCP response to proceed
+        return {"content": [{"type": "text", "text": "ok"}]}
     return {
-        "content": [{"type": "text", "text": "denied"}],
-        "is_error": True,
-        "allowed": False,
+        "content": [{"type": "text", "text": "用户拒绝"}],
+        "isError": True,
     }
 
 
