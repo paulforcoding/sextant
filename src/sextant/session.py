@@ -21,6 +21,8 @@ from claude_agent_sdk import (
     create_sdk_mcp_server,
 )
 
+from .mailbox import Mailbox
+
 if TYPE_CHECKING:
     from .config import SextantConfig
 
@@ -72,6 +74,8 @@ class SessionManager:
         self._current_project: str | None = None
         # Set by the REPL to cancel a __user__ prompt (Ctrl+C).
         self.cancel_event: asyncio.Event = asyncio.Event()
+        # P4-4: persistent message log
+        self._mailbox = Mailbox()
 
     # -- public ----------------------------------------------------
 
@@ -166,7 +170,12 @@ class SessionManager:
         - ``__user__``: defers to Phase 3 (returns a placeholder for now).
         """
         if to == "__user__":
-            return await self._prompt_user(from_id, subject, body)
+            result = await self._prompt_user(from_id, subject, body)
+            self._mailbox.record(
+                from_id=from_id, to=to, subject=subject, body=body,
+                reply=result["reply"], elapsed=0,  # user time not measured
+            )
+            return result
 
         if to not in self._clients:
             return {"reply": f"错误: 项目 '{to}' 不存在", "from": "system"}
@@ -175,6 +184,10 @@ class SessionManager:
         if to in self._call_stack:
             # The target is currently blocked waiting for a reply.
             # This message IS the reply — return it directly.
+            self._mailbox.record(
+                from_id=from_id, to=to, subject=subject, body=body,
+                reply=body, elapsed=0,  # instant recursion resolution
+            )
             return {"reply": body, "from": from_id}
 
         # --- normal injection ---
@@ -207,6 +220,11 @@ class SessionManager:
             elapsed = time.time() - t0
             # P4-3: show reply status with duration
             print(f"\n     ✓ {to} 已回复 [{elapsed:.1f}s]", flush=True)
+            # P4-4: persist to mailbox
+            self._mailbox.record(
+                from_id=from_id, to=to, subject=subject, body=body,
+                reply=reply_text, elapsed=elapsed,
+            )
             return {"reply": reply_text, "from": to}
 
         except Exception as exc:
