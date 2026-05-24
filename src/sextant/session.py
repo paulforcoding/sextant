@@ -110,7 +110,6 @@ class SessionManager:
             opts = ClaudeAgentOptions(
                 cwd=str(project.directory),
                 permission_mode=project.permission_mode or self._config.permission_mode or "acceptEdits",
-                permission_prompt_tool_name="mcp__sextant__send_message",
                 setting_sources=["project"],
                 continue_conversation=True,
                 resume=self._resume,  # P5: session resume

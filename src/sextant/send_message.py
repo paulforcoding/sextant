@@ -12,9 +12,6 @@ and returned immediately (no re-injection).
 
 from __future__ import annotations
 
-import sys as _sys
-from typing import Optional
-
 from claude_agent_sdk import tool
 
 # Module-level reference set during session creation.
@@ -58,13 +55,12 @@ async def send_message_handler(args: dict) -> dict:
     """
     global _manager
 
-    # P5: debug log
-    import json as _json
-    print("[DEBUG] send_message_handler ENTERED", file=_sys.stderr, flush=True)
-    print(
-        f"[DEBUG] send_message args: {_json.dumps(args, ensure_ascii=False)}",
-        file=_sys.stderr, flush=True,
-    )
+    # Debug logging (opt-in via SEXTANT_DEBUG=1)
+    import os as _os, json as _json
+    if _os.environ.get("SEXTANT_DEBUG"):
+        import sys as _sys
+        _sys.stderr.write(f"[DEBUG] send_message: {_json.dumps(args, ensure_ascii=False)}\n")
+        _sys.stderr.flush()
 
     # ── detect permission request ──────────────────────────────────
     if "tool_name" in args and "to" not in args:
