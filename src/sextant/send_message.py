@@ -46,11 +46,15 @@ async def send_message_handler(args: dict) -> dict:
     """MCP tool handler.  Delegates to SessionManager.route_message()."""
     global _manager
 
+    # P5: unconditional entry log to stderr
+    import sys as _sys
+    print("[DEBUG] send_message_handler ENTERED", file=_sys.stderr, flush=True)
+
     # P5: debug log for permission_prompt_tool_name format discovery
     import json as _json
     print(
-        f"\n[DEBUG] send_message args: {_json.dumps(args, ensure_ascii=False)}",
-        flush=True,
+        f"[DEBUG] send_message args: {_json.dumps(args, ensure_ascii=False)}",
+        file=_sys.stderr, flush=True,
     )
 
     to = args.get("to", "__user__")  # fallback: permission prompts may omit 'to'
