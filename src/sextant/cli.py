@@ -1,14 +1,17 @@
 """CLI entry point for sextant.
 
-Phase 1 commands:
-    sextant chat <project>  — start interactive REPL with a project's CC agent
+Phase 2 commands:
+    sextant chat <project>  — start interactive REPL (all agents start in background)
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
-from .config import load_config
+from .config import ProjectConfig, load_config
 from .chat import chat
 
 
@@ -41,24 +44,25 @@ def main() -> None:
 
 
 async def _cmd_chat(args) -> None:
-    """Handle `sextant chat <project>`."""
     config = load_config(args.config)
 
+    # Look up the project by ID or fall back to direct path
+    project_id: str
     try:
-        project = config.get_project(args.project)
+        config.get_project(args.project)
+        project_id = args.project
     except KeyError:
-        # Allow direct path as fallback: sextant chat /path/to/project
-        from pathlib import Path
-        from .config import ProjectConfig
         path = Path(args.project).expanduser().resolve()
         if path.is_dir():
-            project = ProjectConfig(
-                id=path.name,
+            project_id = path.name
+            # Synthesize a one-shot config entry so SessionManager sees it
+            config.projects.append(ProjectConfig(
+                id=project_id,
                 directory=path,
-            )
-            print(f"使用目录作为项目: {project.id}")
+            ))
+            print(f"使用目录作为项目: {project_id}")
         else:
             print(f"错误: 项目 '{args.project}' 不存在，且路径 '{path}' 不是目录。")
             sys.exit(1)
 
-    await chat(project)
+    await chat(config, project_id)
