@@ -134,15 +134,13 @@ async def _handle_permission_request(args: dict) -> dict:
     reply = result.get("reply", "").strip().lower()
     if reply in ("y", "yes", "是", "允许", "可以", "ok", "好"):
         return {
-            "content": [{"type": "text", "text": "允许"}],
-            "reply": "允许",
-            "from": "__user__",
+            "content": [{"type": "text", "text": "allowed"}],
+            "is_error": False,
             "allowed": True,
         }
     return {
-        "content": [{"type": "text", "text": "已拒绝"}],
-        "reply": "已拒绝",
-        "from": "__user__",
+        "content": [{"type": "text", "text": "denied"}],
+        "is_error": True,
         "allowed": False,
     }
 
