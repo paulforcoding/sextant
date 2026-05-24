@@ -12,6 +12,9 @@ and returned immediately (no re-injection).
 
 from __future__ import annotations
 
+import sys as _sys
+from typing import Optional
+
 from claude_agent_sdk import tool
 
 # Module-level reference set during session creation.
@@ -32,34 +35,42 @@ def set_manager(manager: "SessionManager") -> None:  # noqa: F821
 @tool(
     name="send_message",
     description=(
-        "向其他项目的 Agent 发送消息并同步等待回复。"
-        "调用后会阻塞直到目标 Agent 处理完毕，返回其文本回复。"
-        "to='__user__' 可以向真人用户提问（阻塞等待）。"
+        "通用消息/权限网关。两种模式："
+        "1) send_message: to='项目ID' 或 '__user__' 发送消息并等待回复。"
+        "2) 权限审批: CC 权限系统调用此工具请求用户批准操作。"
     ),
     input_schema={
-        "to": str,
-        "subject": str,
-        "body": str,
+        "to": Optional[str],
+        "subject": Optional[str],
+        "body": Optional[str],
+        "tool_name": Optional[str],
+        "input": Optional[dict],
     },
 )
 async def send_message_handler(args: dict) -> dict:
-    """MCP tool handler.  Delegates to SessionManager.route_message()."""
+    """MCP tool handler.  Delegates to SessionManager.route_message().
+
+    Also handles CC permission requests (routed via
+    ``permission_prompt_tool_name``).
+    """
     global _manager
 
-    # P5: unconditional entry log to stderr
-    import sys as _sys
-    print("[DEBUG] send_message_handler ENTERED", file=_sys.stderr, flush=True)
-
-    # P5: debug log for permission_prompt_tool_name format discovery
+    # P5: debug log
     import json as _json
+    print("[DEBUG] send_message_handler ENTERED", file=_sys.stderr, flush=True)
     print(
         f"[DEBUG] send_message args: {_json.dumps(args, ensure_ascii=False)}",
         file=_sys.stderr, flush=True,
     )
 
-    to = args.get("to", "__user__")  # fallback: permission prompts may omit 'to'
-    subject = args.get("subject", args.get("tool_name", "?"))
-    body = args.get("body", _json.dumps(args.get("input", args), ensure_ascii=False))
+    # ── detect permission request ──────────────────────────────────
+    if "tool_name" in args and "to" not in args:
+        return await _handle_permission_request(args)
+
+    # ── normal send_message ────────────────────────────────────────
+    to = args.get("to", "__user__")
+    subject = args.get("subject", "?")
+    body = args.get("body", "")
 
     if _manager is None:
         return {
@@ -82,6 +93,54 @@ async def send_message_handler(args: dict) -> dict:
         "content": [{"type": "text", "text": f"{result['reply']}"}],
         "reply": result["reply"],
         "from": result["from"],
+    }
+
+
+# ------------------------------------------------------------------
+# Permission request handler (P5)
+# ------------------------------------------------------------------
+
+
+async def _handle_permission_request(args: dict) -> dict:
+    """Handle a CC permission request routed through our tool.
+
+    CC calls this tool (via ``--permission-prompt-tool``) with:
+        {"tool_name": "Bash", "input": {"command": "rm ..."}, ...}
+
+    We block and ask the human user for approval.
+    """
+    global _manager
+
+    if _manager is None:
+        return {"reply": "(无法处理: SessionManager 未初始化)", "from": "system"}
+
+    tool_name = args.get("tool_name", "?")
+    tool_input = args.get("input", {})
+
+    # Format the permission prompt for the user
+    import json as _json
+    subject = f"允许 {tool_name}?"
+    body = f"{tool_name}: {_json.dumps(tool_input, ensure_ascii=False)[:300]}"
+
+    from_id = _manager.current_project or "?"
+    result = await _manager.route_message(
+        from_id=from_id, to="__user__", subject=subject, body=body
+    )
+
+    # Interpret user response
+    reply = result.get("reply", "").strip().lower()
+    if reply in ("y", "yes", "是", "允许", "可以", "ok", "好"):
+        return {
+            "content": [{"type": "text", "text": "允许"}],
+            "reply": "允许",
+            "from": "__user__",
+            "allowed": True,
+        }
+    return {
+        "content": [{"type": "text", "text": "已拒绝"}],
+        "reply": "已拒绝",
+        "from": "__user__",
+        "allowed": False,
     }
 
 
