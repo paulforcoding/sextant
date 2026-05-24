@@ -1,0 +1,12 @@
+[project]
+name = "sextant"
+version = "0.1.0"
+description = "Multi-project agent collaboration tool — manage multiple Claude Code instances from one terminal"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk>=0.2.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+sextant = "sextant.cli:main"
