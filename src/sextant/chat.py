@@ -190,8 +190,8 @@ def _display_message(msg) -> None:
                 print(f"\n     ✓{duration}")
     elif isinstance(msg, ResultMessage):
         print()
-        # Warn about orphaned tool timers
-        if _tool_start_times:
+        # Warn about orphaned tool timers (single orphan is normal with canUseTool)
+        if len(_tool_start_times) > 1:
             print(
                 f"  ⚠ {len(_tool_start_times)} tool(s) without result",
                 file=sys.stderr,
@@ -244,8 +244,15 @@ def _render_thinking(block) -> None:
 
 
 def _pop_duration(tool_use_id: str) -> str:
-    """Pop the start time for *tool_use_id* and return a formatted duration string."""
+    """Pop the start time for *tool_use_id* and return a formatted duration string.
+
+    Falls back to popping *any* stored entry when the exact ID doesn't
+    match — canUseTool + PreToolUse hook can change SDK block IDs.
+    """
     start = _tool_start_times.pop(tool_use_id, None)
+    if start is None and _tool_start_times:
+        # Fallback: grab oldest entry (single tool call → single result)
+        _key, start = _tool_start_times.popitem()
     if start is not None:
         return f" [{time.time() - start:.1f}s]"
     return ""
