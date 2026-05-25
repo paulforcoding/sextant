@@ -261,7 +261,7 @@ def _display_message(msg) -> None:
                 print(f"\n     ✓{duration}")
     elif isinstance(msg, ResultMessage):
         print()
-        if len(_tool_start_times) > 1:
+        if _tool_start_times:
             print(
                 f"  ⚠ {len(_tool_start_times)} tool(s) without result",
                 file=sys.stderr,

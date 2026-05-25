@@ -32,7 +32,7 @@ async def session_worker(url: str, label: str, actions: list):
             return results
 
 
-async def test():
+async def run_notification_test():
     # 两个 session 同时保持：sextant 发消息，ncp 等着收
     async with asyncio.TaskGroup() as tg:
         # ncp 先启动（它会先 ping 注册，然后等待）
@@ -74,4 +74,4 @@ async def test():
 
 
 if __name__ == "__main__":
-    asyncio.run(test())
+    asyncio.run(run_notification_test())
