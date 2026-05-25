@@ -1,28 +1,32 @@
-"""The single MCP tool that powers all agent-to-agent communication.
+"""The single MCP tool that powers agent-to-agent communication.
 
-``send_message`` is the only MCP tool exposed by sextant.  When an agent
-calls it, sextant injects the message into the target agent's conversation
-and blocks until the target finishes processing, then returns the target's
-full text output as the tool result.
+v2.0: ``send_message`` writes to the recipient's mailbox and returns immediately.
+No blocking, no route_message, no recursion protection needed.
 
-Recursion protection (``_call_stack``): if the target is currently blocked
-waiting for a reply from the sender, the message is treated as that reply
-and returned immediately (no re-injection).
+The recipient sees the message as a draft when the user runs ``/chat <project>``.
 """
 
 from __future__ import annotations
 
 from claude_agent_sdk import tool
 
-# Module-level reference set during session creation.
-# Avoids a hard circular import with session.py.
+from .mailbox import Mailbox
+
+# Module-level references set during session creation.
 _manager: "SessionManager | None" = None  # noqa: F821
+_mailbox: Mailbox | None = None
 
 
 def set_manager(manager: "SessionManager") -> None:  # noqa: F821
-    """Wire the SessionManager singleton so the tool handler can route."""
+    """Wire the SessionManager singleton so the tool handler can access config."""
     global _manager
     _manager = manager
+
+
+def set_mailbox(mbox: Mailbox) -> None:
+    """Wire the Mailbox singleton."""
+    global _mailbox
+    _mailbox = mbox
 
 
 # ------------------------------------------------------------------
@@ -32,13 +36,13 @@ def set_manager(manager: "SessionManager") -> None:  # noqa: F821
 @tool(
     name="send_message",
     description=(
-        "向其他项目或用户发送消息并等待回复。\n"
-        "用法: to='项目ID'|'__user__', subject, body。"
+        "向其他项目发送消息。消息会投递到对方的收件箱，对方下次查看时会看到。\n"
+        "用法: to='项目ID', subject, body。"
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "to": {"type": "string", "description": "目标项目ID 或 __user__"},
+            "to": {"type": "string", "description": "目标项目ID"},
             "subject": {"type": "string"},
             "body": {"type": "string"},
         },
@@ -46,8 +50,8 @@ def set_manager(manager: "SessionManager") -> None:  # noqa: F821
     },
 )
 async def send_message_handler(args: dict) -> dict:
-    """MCP tool handler.  Delegates to SessionManager.route_message()."""
-    global _manager
+    """MCP tool handler.  Writes to mailbox and returns ack immediately."""
+    global _manager, _mailbox
 
     to = args["to"]
     subject = args["subject"]
@@ -55,30 +59,43 @@ async def send_message_handler(args: dict) -> dict:
 
     if _manager is None:
         return {
-            "reply": "(sextant 内部错误: SessionManager 未初始化)",
-            "from": "system",
+            "status": "error",
+            "message": "sextant 内部错误: SessionManager 未初始化",
         }
 
     from_id = _manager.current_project
     if from_id is None:
         return {
-            "reply": "(sextant 内部错误: 未设置 current_project)",
-            "from": "system",
+            "status": "error",
+            "message": "sextant 内部错误: 未设置 current_project",
         }
 
-    result = await _manager.route_message(
-        from_id=from_id, to=to, subject=subject, body=body
-    )
+    # Validate recipient
+    if to not in _manager.project_ids:
+        return {
+            "status": "error",
+            "message": f"项目 '{to}' 不存在。可用项目: {', '.join(_manager.project_ids)}",
+        }
+
+    # Write to mailbox
+    if _mailbox is None:
+        return {
+            "status": "error",
+            "message": "sextant 内部错误: Mailbox 未初始化",
+        }
+
+    msg_id = _mailbox.record(from_id=from_id, to=to, subject=subject, body=body)
 
     return {
-        "content": [{"type": "text", "text": f"{result['reply']}"}],
-        "reply": result["reply"],
-        "from": result["from"],
+        "content": [{"type": "text", "text": f"消息已发送给 {to}（msg_id: {msg_id}）"}],
+        "status": "sent",
+        "msg_id": msg_id,
+        "to": to,
     }
 
 
 # ------------------------------------------------------------------
-# Public API for chat.py
+# Public API for chat.py / session.py
 # ------------------------------------------------------------------
 
 send_message_tool = send_message_handler  # alias for SDK registration

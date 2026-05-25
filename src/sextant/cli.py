@@ -90,15 +90,22 @@ def _cmd_mailbox(args) -> None:
 
 
 def _cmd_status(args) -> None:
-    """Show project session status by inspecting session files."""
+    """Show project session status and mailbox pending counts."""
     try:
         config = load_config("sextant.yaml")
     except (FileNotFoundError, Exception) as e:
         print(f"无法读取配置: {e}")
         sys.exit(1)
 
-    print(f"{'项目':<12s} {'目录':<40s} {'会话':<8s} {'最后活跃'}")
-    print("-" * 80)
+    # Also check mailbox for pending counts
+    try:
+        mbox = Mailbox()
+        counts = mbox.all_pending_counts()
+    except Exception:
+        counts = {}
+
+    print(f"{'项目':<12s} {'待处理':>6s} {'会话':<6s} {'最后活跃'}")
+    print("-" * 62)
 
     for proj in config.projects:
         proj_dir = Path(proj.directory).expanduser().resolve()
@@ -106,10 +113,11 @@ def _cmd_status(args) -> None:
 
         session_exists = session_dir.is_dir()
         status = "✓" if session_exists else "✗"
+        pending = counts.get(proj.id, 0)
+        pending_str = str(pending) if pending > 0 else "—"
 
         last_active = "—"
         if session_exists:
-            # Find most recently modified file in .claude/
             try:
                 files = sorted(
                     session_dir.rglob("*"),
@@ -123,7 +131,7 @@ def _cmd_status(args) -> None:
             except (OSError, PermissionError):
                 last_active = "?"
 
-        print(f"{proj.id:<12s} {str(proj_dir):<40s} {status:<8s} {last_active}")
+        print(f"{proj.id:<12s} {pending_str:>6s} {status:<6s} {last_active}")
 
 
 async def _cmd_chat(args) -> None:

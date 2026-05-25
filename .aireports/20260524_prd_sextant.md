@@ -1,8 +1,8 @@
 # sextant — 产品需求文档 (PRD)
 
-> **版本**: 1.2  
-> **日期**: 2026-05-24  
-> **状态**: Phase 1-3 已完成，Phase 4 进行中  
+> **版本**: 1.3  
+> **日期**: 2026-05-25  
+> **状态**: Phase 1-5 已完成，Phase 6 待开发  
 > **作者**: ZP & 墨鱼  
 
 ---
@@ -35,7 +35,7 @@
 
 **sextant** 是一个多项目 Agent 协同开发工具。它让开发者在**一个终端界面**中管理多个 Claude Code 实例，实现 Agent 间的跨项目通信、消息路由与协作。
 
-核心思路：用 Claude Code Agent SDK 管理所有 CC 会话，通过一个名为 `send_message` 的 MCP tool 实现 Agent 间的同步消息传递。用户通过 `sextant chat <project>` REPL 与任一项目的 Agent 交互，sextant 在后台处理 Agent 间的消息路由，且 Agent 不需要区分消息来自真人用户还是其他 Agent。
+核心思路：用 Claude Code Agent SDK 管理所有 CC 会话，通过一个名为 `send_message` 的 MCP tool 实现 Agent 间的**异步**消息传递。消息全部流经 mailbox（JSONL 持久化），Agent 不区分 prompt 来源（人/Agent）。用户通过 `sextant chat <project>` REPL 与任一项目的 Agent 交互，用户审批和提问通过 CC SDK 的 `canUseTool` 回调统一处理。
 
 **一句话定位**：一个终端，多个 CC Agent，互相协作完成跨项目开发任务。
 
@@ -89,9 +89,9 @@ $ sextant chat acp
 **sextant 做什么**：
 - 管理多个 CC Agent 会话（启动、恢复、关闭）
 - 提供统一的 REPL 界面，让用户与任一 Agent 交互
-- 提供 `send_message` 工具，让 Agent 之间可以相互发送消息
-- 当 Agent 需要用户决策时，在 REPL 中阻塞等待用户回答
-- 持久化消息记录（mailbox），支持审计回溯
+- 提供 `send_message` 工具，让 Agent 之间可以**异步**发送消息（mailbox 驱动）
+- 通过 `canUseTool` 回调统一处理所有 Agent 的用户交互（工具审批、问题询问）
+- 持久化所有消息到 mailbox（JSONL），支持审计回溯
 
 **sextant 不做什么**：
 - 不实现 A2A 协议或语义路由
@@ -140,9 +140,10 @@ sextant 的设计由以下五条原则驱动。所有架构决策都必须与这
 |---|------|------|----------|
 | P1 | **project_id = basename(cwd)** | 项目标识等同于工作目录的最后一个目录名 | 无需额外配置，从文件路径直接推导 |
 | P2 | **全局串行** | 所有 CC 会话 + 用户交互在单个事件循环中串行执行 | 消除并发竞争，无需锁机制 |
-| P3 | **CC 不分人来人往** | 子项目 CC 不区分消息来源（用户 vs Agent），都视为"有人在跟我说话" | 简化 Agent prompt，统一交互模型 |
-| P4 | **send_message 是同步的** | 发送消息后阻塞等待对方回复，回复作为 tool 返回值 | 符合"只有一个脑袋"的串行开发模式 |
-| P5 | **`__user__` 是特殊收件人** | Agent 向 `__user__` 发消息时，sextant 在 REPL 中阻塞等待真人输入 | 用户成为消息路由图中的一个特殊节点 |
+|| P3 | **CC 无言者之分** | Agent 收到的所有 prompt 统一来源于 mailbox，不区分"人发的"还是"Agent 发的" | 消除 Agent 端的区别对待，无需 system prompt 教回复 |
+|| P4 | **send_message 投递即忘** | `send_message` 写入 mailbox 后立即返回 ack，不阻塞、不等回复 | 消除同步等待、递归防护、call_stack 全部作废 |
+|| P5 | **mailbox 是唯一真相源** | 所有人→Agent、Agent→Agent、Agent→人的消息全走 mailbox；Agent 的下一轮 prompt 由 mailbox 拼装 | 消息流单一入口，可审计、可回溯、可重放 |
+|| P6 | **`__user__` 通过 canUseTool 交互** | Agent 需要用户决策时通过 `canUseTool` 回调弹窗，前台/后台 Agent 统一使用同一机制 | 用户交互不再靠 MCP tool，不受 Agent 间消息流影响 |
 
 ---
 
@@ -172,38 +173,43 @@ sextant 的设计由以下五条原则驱动。所有架构决策都必须与这
 **详细要求**:
 - FR2.1: 提供 readline 风格的输入提示（`> `）
 - FR2.2: 流式输出 Agent 的文本回复
-- FR2.3: Agent 调用 `send_message(to="__user__")` 时，REPL 切换为问答模式，阻塞等待用户输入
+- FR2.3: Agent 调用需要审批的工具或 `AskUserQuestion` 时，`canUseTool` 回调在 REPL 中弹窗等待用户决策
 - FR2.4: `Ctrl+C` 退出当前 chat，会话保持，下次 resume 继续
 - FR2.5: 支持 `/` 开头的内置命令（如 `/help`，未来可扩展）
 
 ---
 
-### 6.3 FR3：Agent 间同步消息传递
+### 6.3 FR3：Agent 间异步消息传递
 
-**描述**: Agent 通过 `send_message` MCP tool 向其他 Agent 发送消息并同步等待回复。
+**描述**: Agent 通过 `send_message` MCP tool 向其他 Agent 投递消息。消息写入 mailbox 后立即返回，目标 Agent 在下一次获得 prompt 时从 mailbox 拉取并处理。
 
 **详细要求**:
 - FR3.1: 参数 `to`（收件人 project_id）、`subject`（标题）、`body`（消息正文）
-- FR3.2: 调用后系统阻塞等待目标 Agent 的完整回复，回复作为 tool 返回值
-- FR3.3: 所有消息持久化到 mailbox（文件系统）供审计
-- FR3.4: 目标 Agent 的回复是其在处理消息期间产生的全部文本输出
+- FR3.2: 调用后**立即返回** ack（`{"status": "sent", "msg_id": "..."}`），不阻塞
+- FR3.3: 所有消息持久化到 mailbox（JSONL 文件），按收件人分组
+- FR3.4: 目标 Agent 下一次获得 prompt 时，sextant 将 mailbox 中的待处理消息拼入上下文
+- FR3.5: 目标 Agent 处理完消息后的文本输出，自动写回发送方 mailbox 作为回复
+- FR3.6: Agent **不需要**主动调用 `send_message` 来"回复"——它的自然输出就是回复
 
 **约束**:
 - FR3-C1: 只有 `send_message` 一个 MCP tool，没有 `check_inbox`、`list_projects` 等
-- FR3-C2: 目标 Agent 的 prompt 中自然注入消息内容 + 回复指示，不需要 Agent 主动轮询
+- FR3-C2: Agent 收到的 prompt 由 `[mailbox 待处理消息] + [用户输入]` 拼接而成，不区分来源
 
 ---
 
-### 6.4 FR4：用户作为特殊收件人
+### 6.4 FR4：用户交互（canUseTool）
 
-**描述**: Agent 可以向 `__user__` 发送消息以获取真人决策。
+**描述**: Agent 需要用户决策时通过 CC SDK 的 `canUseTool` 回调触发交互。不再使用 `send_message(to="__user__")`。
 
 **详细要求**:
-- FR4.1: `send_message(to="__user__")` 触发 REPL 阻塞等待
-- FR4.2: 在 REPL 中展示发送者身份、问题内容
-- FR4.3: 用户的文本回复作为 tool 返回值传回调用方 Agent
-- FR4.4: 用户回复也写入 mailbox 持久化记录
-- FR4.5: 用户可以用 `Ctrl+C` 跳过（返回 `(用户未回复)`）
+- FR4.1: Agent 调任何需要审批的工具（Bash/Write/Edit 等）→ `canUseTool` 拦截 → 展示给用户审批
+- FR4.2: Agent 调 `AskUserQuestion` → `canUseTool` 拦截 → 格式化选项展示给用户
+- FR4.3: 前台 Agent（当前 REPL 中的项目）：直接在 REPL 内弹窗交互
+- FR4.4: 后台 Agent（非当前 REPL 项目）：审批请求入队，用户切到该项目时处理，或通过状态栏提示
+- FR4.5: 用户可用 `y/n` 批准/拒绝工具调用，或选择 AskUserQuestion 的选项
+- FR4.6: 用户回复写入 mailbox 持久化记录
+
+**设计意图**: `canUseTool` 是 CC SDK 的标准用户交互机制。所有 Agent（前台/后台）**统一使用同一套机制**，不再通过 MCP tool 绕路。
 
 ---
 
@@ -229,7 +235,7 @@ sextant 的设计由以下五条原则驱动。所有架构决策都必须与这
 ### 7.2 NFR2：性能
 
 - NFR2.1: sextant 启动时间 < 10 秒（含所有 Agent 初始化）
-- NFR2.2: `send_message` 同步等待不增加额外延迟（仅取决于目标 Agent 的处理时间）
+- NFR2.2: `send_message` 写入 mailbox 的延迟 < 10ms（同步文件 I/O）
 - NFR2.3: 3-4 个 CC Agent 的内存开销控制在 1GB 以内
 
 ### 7.3 NFR3：可维护性
@@ -255,24 +261,25 @@ sextant 的设计由以下五条原则驱动。所有架构决策都必须与这
 │                    sextant（Python 进程）                      │
 │                                                              │
 │  ┌──────────────────────┐    ┌───────────────────────────┐   │
-│  │   MCP Tool（唯一）    │    │    消息路由（同步）        │   │
+│  │   MCP Tool（唯一）    │    │     Mailbox（唯一真相源）   │   │
 │  │                      │    │                           │   │
-│  │   send_message       │◄───│  to="ncp"  → 注入 ncp     │   │
-│  │   (进程内 SDK 调用)   │    │  to="__user__" → REPL阻塞  │   │
-│  └──────────────────────┘    └──────────┬────────────────┘   │
+│  │   send_message       │◄───│  写入: agent调send_message │   │
+│  │   (投递即忘)          │    │  读取: 组装agent prompt    │   │
+│  └──────────────────────┘    │  持久化: JSONL 按日分片    │   │
+│                              └──────────┬────────────────┘   │
 │                                         │                    │
 │  ┌──────────────────────┐    ┌──────────┴────────────────┐   │
-│  │   Mailbox             │    │   Session Manager        │   │
-│  │   (文件 inbox)        │    │                          │   │
-│  │   持久化消息记录       │    │   acp: ClaudeSDKClient   │   │
-│  └──────────────────────┘    │   ncp: ClaudeSDKClient   │   │
-│                              │   xcp: ClaudeSDKClient   │   │
-│                              └──────────┬───────────────┘   │
+│  │   canUseTool 回调     │    │   Session Manager        │   │
+│  │                      │    │                          │   │
+│  │   工具审批 (Bash/..)  │◄───│   acp: ClaudeSDKClient   │   │
+│  │   AskUserQuestion    │    │   ncp: ClaudeSDKClient   │   │
+│  │   统一前台/后台弹窗   │    │   xcp: ClaudeSDKClient   │   │
+│  └──────────────────────┘    └──────────┬───────────────┘   │
 │                                         │                   │
 │  ┌──────────────────────────────────────┴────────────────┐  │
 │  │   REPL（sextant chat <project>）                      │  │
-│  │   readline 输入 → query → 流式输出                     │  │
-│  │   send_message(to="__user__") → 阻塞等待用户输入       │  │
+│  │   readline 输入 → mailbox拼装 → query → 流式输出       │  │
+│  │   输出自动写回 mailbox 作为回复                        │  │
 │  └──────────────────────────────────────────────────────┘  │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
@@ -283,11 +290,11 @@ sextant 的设计由以下五条原则驱动。所有架构决策都必须与这
 | 模块 | 职责 | 关键技术 |
 |------|------|----------|
 | `config.py` | 解析 `sextant.yaml`，提供项目列表和路径 | PyYAML |
-| `mailbox.py` | 消息持久化：写 JSON 文件，读历史消息 | 文件 I/O |
-| `session.py` | 管理 ClaudeSDKClient 生命周期：创建、恢复、关闭 | CC Agent SDK |
-| `send_message.py` | 唯一 MCP tool 实现 + 同步路由 + 递归防护 | CC SDK `create_sdk_mcp_server` |
-| `chat.py` | REPL 交互：输入、流式输出、`__user__` 阻塞等待 | asyncio + readline |
-| `cli.py` | CLI 入口：`sextant start`、`sextant chat` | argparse |
+| `mailbox.py` | **核心模块**：消息写入、读取、组装 prompt、回复回写 | JSONL 文件 I/O |
+| `session.py` | 管理 ClaudeSDKClient 生命周期 + `canUseTool` 回调 + mailbox 注入 | CC Agent SDK |
+| `send_message.py` | 唯一 MCP tool：接收 Agent 调用 → 写入 mailbox → 立即返回 ack | CC SDK `create_sdk_mcp_server` |
+| `chat.py` | REPL 交互：输入 → 从 mailbox 组装 prompt → query → 流式输出 → 输出回写 mailbox | asyncio + readline |
+| `cli.py` | CLI 入口：`sextant chat`、`sextant mailbox`、`sextant status` | argparse |
 
 ### 8.3 技术选型
 
@@ -319,24 +326,42 @@ sextant · acp
 
 用户输入 → `client.query(input)` → 流式输出 Agent 回复 → 等待下次输入。循环。
 
-### 9.2 Agent 询问用户
+### 9.2 Agent 请求用户审批
 
-当 Agent 调用 `send_message(to="__user__", subject="确认变更", body="是要同步第2个还是第3个变更？")`：
+当 Agent 调用需要审批的工具（如 Bash/Write）时，`canUseTool` 回调拦截并展示：
 
 ```
-[acp] 我需要确认一下……
+[ncp] 我需要修改 auth_middleware.py...
 ──────────────────────────────────────────
-🤔 acp 想知道：
-确认变更
-
-是要同步第2个还是第3个变更？
+🤔 ncp 想执行：
+允许 Edit?
+  ✏️ /src/auth/auth_middleware.py
+  -Token = field["token"]
+  +Token = TokenStruct(**field["token"])
 ──────────────────────────────────────────
-> 第2个
+> y
 
-[acp 收到回复] 好的，只同步第2个变更
+[ncp] 已修改。
 ```
 
-用户输入被返回给 `send_message` 的调用方（acp Agent），Agent 继续处理。
+Agent 也可以通过 `AskUserQuestion` 直接提问：
+
+```
+[ncp] src/auth/ 下有两个文件用了 Token，不确定改哪些...
+──────────────────────────────────────────
+🤔 ncp 想知道：
+修改范围？
+
+  1. 只改 token_serializer.py（序列化层）
+  2. 序列化 + auth_middleware 的 map 逻辑一起改
+  3. 暂改序列化，auth_middleware 单独排查
+──────────────────────────────────────────
+> 2
+
+[ncp] 收到，一起改。
+```
+
+**关键**：`canUseTool` 是 CC SDK 的标准机制。所有 Agent（无论前台/后台）都通过同一个回调处理用户交互。不再有特殊的 `send_message(to="__user__")` 路径。
 
 ### 9.3 切换项目
 
@@ -376,369 +401,283 @@ sextant · acp
 
 ---
 
-## 10. 消息路由模型
+## 10. 消息模型：mailbox 驱动
 
-### 10.1 路由规则
+### 10.1 核心思想
 
-| `to` 参数 | sextant 行为 |
-|-----------|-------------|
-| `"ncp"`（普通 project_id） | 注入目标 CC 会话 → 阻塞等待 → 返回目标 Agent 的全部文本输出 |
-| `"__user__"`（特殊收件人） | REPL 展示问题 → 阻塞等待用户输入 → 返回用户回复文本 |
-| 等于 `_call_stack[-1]` | 检测到递归回复 → 直接返回，不注入（递归防护） |
-| 其他 project_id | 同第一条 |
-
-### 10.2 完整消息流
+**mailbox 是 sextant 的唯一真相源。** 所有人→Agent、Agent→Agent、Agent→人的消息全部流经 mailbox。Agent 不区分 prompt 来源——无论来自人还是其他 Agent，对 Agent 来说都是"我收到了新消息需要处理"。
 
 ```
-Step 1: 用户对 acp 输入"通知 ncp 修改 XXX"
-        → acp 调用 send_message(to="ncp", subject="修改 XXX", body="...")
-
-Step 2: sextant 处理 send_message
-        → 写 mailbox 记录: acp → ncp
-        → _call_stack.append("acp")
-        → ncp_client.query("📬 来自 acp 的消息：修改 XXX\n\n请处理。\n处理完调用 send_message(to='acp', ...) 回复。")
-
-Step 3: ncp 处理消息
-        → ncp 分析后不确定，调用 send_message(to="acp", subject="Re: 修改 XXX", body="是要改 XXX-1 吗？")
-        
-Step 4: sextant 检测到 _call_stack[-1] == "acp"
-        → 递归防护：直接返回 {"reply": "是要改 XXX-1 吗？"} 给 ncp
-        → ncp 的 send_message 调用完成
-
-Step 5: ncp 继续处理，输出"已修改 XXX-1"
-        → ncp 的 query 完成，receive_response() 返回完整的文本输出
-        
-Step 6: sextant 将 ncp 的输出作为 send_message 返回值
-        → _call_stack.pop()
-        → return {"from": "ncp", "reply": "已修改 XXX-1"}
-
-Step 7: acp 收到 return value，继续处理
-        → 向用户汇报"ncp 已完成修改"
+发送方 → send_message() 写入 mailbox → 立即返回 ack
+接收方 → 下一轮 prompt = [mailbox待处理消息] + [用户输入] → 正常处理
+接收方输出 → 自动写回发送方 mailbox 作为回复
 ```
+
+### 10.2 消息生命周期
+
+```
+Step 1: Agent A 调用 send_message(to="B", subject="...", body="...")
+        → mailbox.record(from="A", to="B", subject, body, status="pending")
+        → 立即返回 {"status": "sent", "msg_id": "xxx"} 给 Agent A
+        → Agent A 继续工作，不阻塞
+
+Step 2: Agent B 获得新 prompt（用户输入 或 系统触发）
+        → sextant 查询 mailbox: "B 有哪些 pending 消息？"
+        → 拼装 prompt:
+            "📬 你有 1 条新消息:
+             
+             [来自 A] 主题: ...
+             正文: ...
+             
+             ---
+             用户输入: <用户刚输入的内容>"
+
+Step 3: Agent B 处理 prompt（自然处理，不需要区分消息来源）
+        → 可能调用工具、思考、输出文本
+        → 全程 canUseTool 处理用户审批（Bash/Write 等）
+
+Step 4: Agent B 的文本输出被收集
+        → mailbox.record_reply(msg_id="xxx", reply="B 的完整输出", from="B")
+        → msg 状态: pending → replied
+
+Step 5: Agent A 下一次获得 prompt 时
+        → mailbox 中有 B 的回复 → 拼入 prompt 上下文
+        → Agent A 看到 "📬 B 回复了你的消息「主题」: ..."
+```
+
+### 10.3 send_message 的新语义
+
+| 项目 | 旧模型 (Phase 1-5) | 新模型 (Phase 6+) |
+|------|-------------------|-------------------|
+| **调用行为** | 同步阻塞，等对方回复 | 写入 mailbox，立即返回 |
+| **返回值** | `{"reply": "...", "from": "ncp"}` | `{"status": "sent", "msg_id": "xxx"}` |
+| **递归防护** | 需要 `_call_stack` | 不需要（异步解耦） |
+| **System prompt** | 教 Agent "处理完请用 send_message 回复" | 不需要（回复由 sextant 自动处理） |
+| **Agent 是否区分来源** | 名义上不区分，实际上 prompt 带发送者标注 | prompt 统一拼装，真正不区分 |
+
+### 10.4 `__user__` 的新位置
+
+`__user__` 不再是 `send_message` 的特殊收件人。用户交互移入 `canUseTool` 回调：
+
+```
+Agent 需要审批工具（Bash/Write/Edit）
+  → canUseTool 拦截
+  → 展示给用户：工具名 + 参数
+  → 用户 y/n
+  → PermissionResultAllow / PermissionResultDeny
+
+Agent 需要问用户问题（AskUserQuestion）
+  → canUseTool 拦截（tool_name == "AskUserQuestion"）
+  → 格式化选项 → 用户选择
+  → PermissionResultAllow(updated_input={answers})
+```
+
+**前台 vs 后台**:
+- 前台 Agent（当前 REPL 项目）：直接在终端内弹窗，用户即时响应
+- 后台 Agent（非当前项目）：prompt 暂存到 mailbox，切到该项目时处理；状态栏提示 "ncp 等待审批 (Bash)"
 
 ---
 
 ## 11. 端到端协作场景
 
-> 以下场景完整演示三个 Agent（acp、ncp、xcp）在真实开发任务中的协作流程，覆盖消息同步、递归防护、`__user__` 介入等所有关键机制。
+> 以下场景演示 mailbox 驱动模型下的三 Agent 协作。核心变化：send_message 不再阻塞，Agent 间通信变成"发消息 → 切项目 → 收消息 → 回复自动回写"的异步流程。
 
 ### 11.1 初始条件
 
 ```
 项目：
   acp — 协议仓库（用户当前 REPL：sextant chat acp）
-  ncp — 服务端仓库（Python，headless）
-  xcp — 客户端仓库（Rust，headless）
+  ncp — 服务端仓库（Python）
+  xcp — 客户端仓库（Rust）
 
-每个 Agent 的 system prompt 注入：
+每个 Agent 的 system prompt：
   - 你的项目是 {project_id}
-  - 其他项目：[acp, ncp, xcp]（除自己外）
-  - 可以用 send_message(to="...", subject="...", body="...") 向其他项目发消息并等待回复
-  - __user__ 是真人用户，需要判断时可以询问
-  - 收到消息时内容直接可见，不需要查收件箱
-  - 如果你连续两次无法从当前对话方获得有效回复，可以向 __user__ 发起升级询问
+  - 可以通过 send_message(to, subject, body) 向其他项目发消息
+  - 收到的消息会自然出现在 prompt 中，不需要查收件箱
+  - 用户交互通过 canUseTool 弹窗（工具审批、问题询问）
 ```
 
 ### 11.2 场景：协议变更跨项目同步
 
-任务：用户修改了 proto 协议定义（Token 字段从 `string` 改为 `TokenStruct`），需要 ncp 和 xcp 同步修改并确认编译通过。
+任务：用户修改了 proto 协议，Token 字段从 `string` 改为 `TokenStruct`，需要 ncp 和 xcp 同步修改。
 
-#### Step 1：用户发起
+#### Step 1：用户对 acp 发起
 
 ```
 $ sextant chat acp
 
 sextant · acp
 > 我刚改了协议，Token 字段从 string 改成 TokenStruct{token:string, expiry:int64, issuer:string}。
-> 通知 ncp 和 xcp 同步修改，确认编译通过后汇报。
+> 通知 ncp 和 xcp 同步修改，确认编译通过后汇总给我。
 ```
 
-用户**没有**显式说"通知 ncp"、"通知 xcp"。acp Agent 根据 prompt 中的项目列表和任务语义，自己判断出需要通知两个项目。
+#### Step 2：acp 发送消息（不阻塞）
 
-#### Step 2：acp → ncp（第一轮注入）
-
-acp Agent 理解任务后，调用 `send_message`：
+acp 理解任务后，调用 send_message：
 
 ```
-send_message(
-  to="ncp",
-  subject="同步协议变更：Token string → TokenStruct",
-  body="协议定义已变更，/proto/auth.proto 中 Token 字段从 string 改为 TokenStruct{
-      token:string, expiry:int64, issuer:string
-  }。请修改服务端的序列化/反序列化代码，确认编译通过后回复。"
-)
+send_message(to="ncp", subject="同步协议变更：Token → TokenStruct",
+  body="Token 字段从 string 改为 TokenStruct{token,expiry,issuer}。请修改服务端序列化代码。")
+→ {"status": "sent", "msg_id": "m1"}   ← 立即返回！
+
+send_message(to="xcp", subject="同步协议变更：Token → TokenStruct",  
+  body="Token 字段从 string 改为 TokenStruct{token,expiry,issuer}。请修改 Rust 客户端代码。")
+→ {"status": "sent", "msg_id": "m2"}   ← 立即返回！
 ```
 
-sextant 处理：写 mailbox，`_call_stack.append("acp")`，注入 ncp：
+acp 汇报：
 
 ```
-ncp_client.query(
-  "📬 来自 acp 的消息：同步协议变更：Token string → TokenStruct\n\n"
-  "协议定义已变更……\n\n"
-  "请处理此消息。处理完毕后，"
-  "调用 send_message(to='acp', subject='Re: 同步协议变更', body='你的完整回复')。"
-)
+[acp] 已通知 ncp 和 xcp。ncp 需要改序列化代码，xcp 需要改 Rust 客户端。
+      消息已发送，等他们处理完我会汇总。
 ```
 
-#### Step 3：ncp 处理 + 内部疑问
-
-ncp Agent 收到注入，开始分析：
+#### Step 3：用户切换到 ncp
 
 ```
-收到来自 acp 的消息。他们改了 proto，我需要改 src/auth/ 下的序列化代码。
-Token 字段从 string 改成 TokenStruct……
+Ctrl+C                          # 退出 acp
 
-但是，src/auth/ 下有两个地方用了 Token：
-  • token_serializer.py — 纯粹序列化/反序列化
-  • auth_middleware.py — 序列化 + 业务逻辑，Token 被用作 map key
+$ sextant chat ncp
 
-改 token_serializer.py 是明确的。
-auth_middleware.py 里 Token 改成 TokenStruct 后，map 逻辑需要重写。
-这次也需要一起改吗？
+sextant · ncp
+📬 你有 1 条新消息:
+
+[来自 acp] 同步协议变更：Token → TokenStruct
+
+Token 字段从 string 改为 TokenStruct{token,expiry,issuer}。请修改服务端序列化代码。
+
+---
 ```
 
-ncp 不确定范围，根据 prompt 指令回复 acp：
+ncp 开始处理：
 
 ```
-send_message(
-  to="acp",
-  subject="Re: 同步协议变更",
-  body="token_serializer.py 改完了。但 auth_middleware.py 用 Token 做 map key，
-      改成 TokenStruct 后 map 逻辑需要重写。这次也需要改吗？还是只改序列化层？"
-)
+[ncp] 收到 acp 的协议变更通知。让我查看当前代码...
+
+[ncp] src/auth/token_serializer.py 中 Token 需要从 string 改成 TokenStruct。
+      src/auth/auth_middleware.py 也用了 Token 做 map key，这里需要一起改吗？
+
+  ── canUseTool 弹窗 ──
+  🤔 ncp 想知道：
+  
+  1. 只改 token_serializer.py（序列化层）
+  2. 序列化 + auth_middleware 的 map 逻辑一起改
+  
+  > 2，一起改，别留技术债
+  ──────────────────────
+
+[ncp] 收到。正在修改...
+[ncp] token_serializer.py ✓  auth_middleware.py ✓
+[ncp] 编译中...
+[ncp] 编译通过，所有测试通过 ✓
 ```
 
-#### Step 4：递归防护触发
+ncp 的输出自动写回 acp 的 mailbox。
 
-sextant 检测到 `_call_stack[-1] == "acp"`（acp 正在等 ncp 的回复）。ncp 的 `send_message` 被**直接短路返回**：
-
-```
-→ {"reply": "token_serializer.py 改完了。但 auth_middleware.py……这次也需要改吗？", "from": "ncp"}
-```
-
-ncp Agent 收到返回值，不知道也不用知道这是"短路"还是"真的注入了 acp"。它的 `send_message` 调用正常完成。
-
-同时 sextant 继续：`ncp_client.receive_response()` 返回 ncp 的全部文本输出 → `_call_stack.pop()` → acp 的 `send_message` 返回：
+#### Step 4：用户切换到 xcp
 
 ```
-→ {"from": "ncp", "reply": "token_serializer.py 改完了。但 auth_middleware.py……这次也需要改吗？"}
-```
+Ctrl+C
 
-#### Step 5：acp 触发第一次 `__user__` 介入
+$ sextant chat xcp
 
-acp Agent 收到返回值：
+sextant · xcp
+📬 你有 1 条新消息:
 
-```
-ncp 说：token_serializer.py 改完了。但 auth_middleware.py 用 Token 做 map key，
-改成 TokenStruct 后需要重写。这次也需要改吗？还是只改序列化层？
-```
+[来自 acp] 同步协议变更：Token → TokenStruct
 
-acp Agent 分析：
+Token 字段从 string 改为 TokenStruct{token,expiry,issuer}。请修改 Rust 客户端代码。
 
-```
-ncp 在问我一个设计决策问题：auth_middleware 的 map 逻辑要不要改。
-这个问题影响业务逻辑，不是简单的技术判断。我需要问用户。
-```
-
-acp Agent 调用：
-
-```
-send_message(
-  to="__user__",
-  subject="ncp 的疑问：auth_middleware 改不改？",
-  body="ncp 已改完 token_serializer.py，但发现 auth_middleware.py 用了 Token 做 map key，
-      改成 TokenStruct 后 map 逻辑需要重写。\n\n"
-      "选项：\n"
-      "1. 这次只改序列化层\n"
-      "2. 序列化 + map 逻辑一起改\n"
-      "3. 暂不改 auth_middleware，单独排查"
-)
-```
-
-sextant 检测 `to == "__user__"` → 进入 REPL 阻塞模式。
-
-#### Step 6：用户回复
-
-```
-──────────────────────────────────────────
-🤔 acp 想知道：
-ncp 的疑问：auth_middleware 改不改？
-
-ncp 已改完 token_serializer.py，但发现 auth_middleware.py 用了 Token 做 map key，
-改成 TokenStruct 后 map 逻辑需要重写。
-
-选项：
-1. 这次只改序列化层
-2. 序列化 + map 逻辑一起改
-3. 暂不改 auth_middleware，单独排查
-──────────────────────────────────────────
-> 2，一起改了，别留技术债
-```
-
-用户输入 `"2，一起改了，别留技术债"` 被返回给 acp 的 `send_message(to="__user__")` 调用。mailbox 记录：`__user__ → acp`。
-
-#### Step 7：acp 将用户决策转发给 ncp
-
-acp Agent 收到用户回复后继续处理：
-
-```
-用户说一起改。我需要把这个决定传给 ncp。
-```
-
-```
-send_message(
-  to="ncp",
-  subject="Re: 同步协议变更",
-  body="确认：auth_middleware.py 的 map 逻辑也一起改。不要留技术债，完整迁移到 TokenStruct。"
-)
-```
-
-ncp 处理：
-
-```
-"明白了，一起改。正在修改 auth_middleware.py……"
-"已修改。编译中……"
-"编译通过，所有测试通过。"
-```
-
-sextant 返回给 acp：
-
-```
-→ {"reply": "auth_middleware.py 已修改，编译通过，所有测试通过。", "from": "ncp"}
-```
-
-#### Step 8：acp → xcp（第二轮注入）
-
-acp Agent 汇总：
-
-```
-ncp 搞定了。现在轮到 xcp。
-```
-
-```
-send_message(
-  to="xcp",
-  subject="同步协议变更：Token string → TokenStruct",
-  body="Token 字段从 string 改为 TokenStruct{token,expiry,issuer}。
-      请修改 Rust 客户端的反序列化代码。ncp 端已完成。"
-)
-```
-
-xcp Agent 处理：
-
-```
-"收到。让我看看客户端的 proto 生成代码……"
-"客户端的 token.rs 和 config.rs 用了 Token 字段。"
-"正在修改……"
-
-// xcp 内部也遇到疑问
-send_message(
-  to="acp",
-  subject="Re: 同步协议变更",
-  body="token.rs 改完了。但 config.rs 中 Token 被用作连接池的 key，
-      改成 TokenStruct 后 Hash trait 需要重新 derive。加 #[derive(Hash)] 吗？
-      还是改用 token 字符串做 key？"
-)
-```
-
-递归防护再次短路（`_call_stack[-1] == "acp"`），直接返回给 acp。
-
-#### Step 9：acp 第二次触发 `__user__` 介入
-
-acp Agent：
-
-```
-xcp 又有一个 Rust 设计问题。TokenStruct 的 Hash trait……
-
-我对 Rust 的最佳实践不确定。再问用户。
-```
-
-```
-send_message(
-  to="__user__",
-  subject="xcp 的疑问：TokenStruct 的 Hash trait",
-  body="xcp 在 Rust 客户端发现：Token 改成 TokenStruct 后，被用作连接池 key 的地方
-      需要 Hash trait。\n\n选项：\n1. 给 TokenStruct 加 #[derive(Hash)]\n2. 改用 token 字符串做 key"
-)
-```
-
-```
-──────────────────────────────────────────
-🤔 acp 想知道：
-xcp 的疑问：TokenStruct 的 Hash trait
-
-xcp 在 Rust 客户端发现：Token 改成 TokenStruct 后，被用作连接池 key 的地方
-需要 Hash trait。
-
-选项：
-1. 给 TokenStruct 加 #[derive(Hash)]
-2. 改用 token 字符串做 key
-──────────────────────────────────────────
-> 1
-```
-
-#### Step 10：acp 将决策转发 xcp
-
-```
-send_message(
-  to="xcp",
-  subject="Re: 同步协议变更",
-  body="用 #[derive(Hash)]。"
-)
+---
 ```
 
 xcp 处理：
 
 ```
-"收到。已修改。编译中……"
-"编译通过，测试通过。"
+[xcp] 收到协议变更。查看 Rust 端的 Token 使用...
+[xcp] src/token.rs 需要改反序列化。
+      src/config.rs 中 Token 被用作连接池 key，改成 TokenStruct 后需要 Hash trait。
+
+  ── canUseTool 弹窗 ──
+  🤔 xcp 想知道：
+  
+  1. 给 TokenStruct 加 #[derive(Hash)]
+  2. 改用 token 字符串做 key
+  
+  > 1
+  ──────────────────────
+
+[xcp] #[derive(Hash)] 已添加。
+[xcp] cargo build... 编译通过 ✓
+[xcp] cargo test... 测试全部通过 ✓
 ```
 
-#### Step 11：acp 汇总汇报
+xcp 的输出自动写回 acp 的 mailbox。
 
-acp Agent 收集完所有回复后，向用户汇报：
+#### Step 5：用户切回 acp，查看汇总
 
 ```
-好的，协议变更同步完成。汇总如下：
+Ctrl+C
+
+$ sextant chat acp
+
+sextant · acp
+📬 你有 2 条回复:
+
+1. [来自 ncp] Re: 同步协议变更：Token → TokenStruct
+   token_serializer.py 已修改。auth_middleware.py 的 map 逻辑也一起改了。编译通过，测试通过 ✓
+
+2. [来自 xcp] Re: 同步协议变更：Token → TokenStruct
+   token.rs 反序列化已更新。config.rs 添加了 #[derive(Hash)]。编译通过，测试通过 ✓
+
+---
+```
+
+acp 自动汇总：
+
+```
+[acp] 协议变更同步完成。汇总：
 
 📊 Token string → TokenStruct 跨项目同步
   ✓ ncp（服务端）
     • token_serializer.py — 已修改
-    • auth_middleware.py — 已修改（含 map 逻辑重写）
-    • 编译通过，所有测试通过
+    • auth_middleware.py — 已修改（含 map 逻辑）
+    • 编译通过，测试通过
   ✓ xcp（客户端）
     • token.rs — 已修改
-    • config.rs — 已修改（新增 #[derive(Hash)]）
-    • 编译通过，所有测试通过
-
-两次设计决策已由用户确认：
-  1. auth_middleware 一并修改（选2：不留技术债）
-  2. TokenStruct 使用 #[derive(Hash)]（选1：标准做法）
+    • config.rs — 已修改（#[derive(Hash)]）
+    • 编译通过，测试通过
 ```
 
-### 11.3 场景关键洞察
+### 11.3 新模型关键洞察
 
-#### `__user__` 何时被调用？
+#### 为什么 ncp/xcp 不需要"回复"指令？
 
-**只有一种情况**：用户当前 REPL 中的 Agent（本例中的 acp）收到其他 Agent 的疑问，且**自己无法判断**时，调用 `send_message(to="__user__")`。
+在旧模型中，sextant 必须教 Agent "处理完请用 send_message 回复"。新模型中，**Agent 的输出就是回复**——sextant 自动收集 ncp/xcp 的完整文本输出，写回 acp 的 mailbox。Agent 完全不需要知道"有人在等我回复"。
 
-#### 为什么 ncp/xcp 不直接调 `__user__`？
+#### Agent 消息与用户输入如何统一？
 
-因为它们的每条注入消息都以 `"请处理此消息。处理完调用 send_message(to='acp', ...) 回复。"` 结尾——回复目标固定在 `acp`。ncp/xcp 没有动机绕过 acp 直接找 `__user__`。
+```
+sextant 拼装 prompt 时：
 
-#### 如果 ncp 真的绕过 acp 调了 `__user__`？
+  [如果有 mailbox 待处理消息]
+    📬 你有 N 条新消息:
+    [消息1 内容]
+    [消息2 内容]
+    ---
 
-这不是 bug，是**合理的升级行为**。system prompt 中已加入升级约束：
+  [如果有用户输入]
+    <用户输入>
 
-> 如果你连续两次无法从当前对话方获得有效回复，可以向 __user__ 发起升级询问。
+  [如果都没有 — 后台 agent 空闲，等待下次触发]
+```
 
-这个约束提供了"至少试两次"的门槛，防止 Agent 过早绕过中间层直接找用户。
+Agent 收到的永远是一个完整的 prompt，内容来自 mailbox + 用户输入。Agent 不需要解析消息来源。
 
-#### 是否违反 P3（Agent 不区分人来人往）？
+#### canUseTool 如何统一前台/后台审批？
 
-**不违反。** P3 针对的是 Agent **接收**消息时的行为——Agent 不区分消息来源是真人还是其他 Agent。但 Agent 在**发送**消息时，知道 `__user__` 是一个特殊的收件人选项（和知道"ncp"、"xcp"一样）。这是"知道有谁可以发"而非"分得清谁在发"。
-
-类比：你打电话时知道老板的号码和同事的号码 —— 这是"知道目标"。但接电话时不看来电显示分不清是谁 —— 这是"不区分来源"。两者不矛盾。
+- **前台（当前 REPL 项目）**: `canUseTool` 直接在终端弹窗 → 用户即时响应
+- **后台（非当前项目）**: `canUseTool` 将审批请求入队 → 用户切到该项目时展示；状态栏提示例如 `[ncp] 等待审批 · Bash`
 
 ---
 
@@ -746,13 +685,13 @@ acp Agent 收集完所有回复后，向用户汇报：
 
 ### 12.1 `send_message`
 
-**描述**: 向其他项目或用户发送消息，并同步等待回复。
+**描述**: 向其他项目发送消息。消息写入 mailbox 后立即返回，不等待回复。
 
 **参数**:
 
 | 参数 | 类型 | 必填 | 描述 |
 |------|------|------|------|
-| `to` | string | 是 | 收件人标识。有效值：`__user__` 或任意 project_id |
+| `to` | string | 是 | 收件人标识（project_id） |
 | `subject` | string | 是 | 消息主题（简短描述） |
 | `body` | string | 是 | 消息正文（完整内容） |
 
@@ -760,22 +699,24 @@ acp Agent 收集完所有回复后，向用户汇报：
 
 ```json
 {
-  "from": "ncp",
-  "reply": "已修改 XXX-1，编译通过，12/12 测试通过 ✓"
+  "status": "sent",
+  "msg_id": "m_20260525_001",
+  "to": "ncp"
 }
 ```
 
 | 字段 | 类型 | 描述 |
 |------|------|------|
-| `from` | string | 实际回复方的 project_id（或 `__user__`） |
-| `reply` | string | 回复的完整文本内容 |
+| `status` | string | `"sent"` 或 `"error"` |
+| `msg_id` | string | 消息唯一标识，用于 mailbox 关联回复 |
+| `to` | string | 收件人 project_id（回显） |
 
 **行为契约**:
 
-1. **同步阻塞**: 调用此 tool 后，CC Agent 会阻塞直到收到回复。回复作为 tool 的返回值。
-2. **持久化**: 每次调用都会在 mailbox 中创建一条消息记录。
-3. **死信处理**: 如果目标 project_id 不存在或目标 Agent 出错，返回错误信息（不抛异常）。
-4. **递归防护**: 如果调用方正在等待目标方的回复，目标方反调 `send_message` 给调用方时，直接返回而不注入。
+1. **投递即忘**: 调用后立即返回，不阻塞等待对方处理。Agent 应理解为"已送达"，而非"已回复"。
+2. **持久化**: 每次调用在 mailbox 中创建一条 `status=pending` 的消息记录。收件人下次获得 prompt 时自动注入。
+3. **死信处理**: 如果目标 project_id 不存在，返回 `{"status": "error", "message": "项目 'xxx' 不存在"}`。
+4. **无递归防护**: 异步模型不存在递归调用问题，不再需要 `_call_stack`。
 
 ### 12.2 示例
 
@@ -783,13 +724,15 @@ acp Agent 收集完所有回复后，向用户汇报：
 // acp Agent 调用:
 send_message(to="ncp", subject="同步协议变更", body="Token 字段从 string 改为 TokenStruct")
 
-// sextant 注入 ncp → ncp 处理 → ncp 输出文本
-
-// 返回值:
+// sextant 写入 mailbox，立即返回:
 {
-  "from": "ncp",
-  "reply": "已更新 auth.py 和 token.py，新增 TokenStruct 类型。\n所有测试通过。"
+  "status": "sent",
+  "msg_id": "m_20260525_001",
+  "to": "ncp"
 }
+
+// acp 继续工作，不阻塞
+// ncp 的下一个 prompt 会自动包含此消息
 ```
 
 ---
@@ -813,9 +756,9 @@ for project in config.projects:
                 "preset": "claude_code",
                 "append": (
                     f"你的项目是 {project_id}。\n"
-                    f"可以通过 send_message 向以下项目发消息：{other_projects}。\n"
-                    f"向 __user__ 发消息可以询问用户。\n"
-                    f"收到消息时会直接显示在对话中。"
+                    f"可以通过 send_message(to, subject, body) 向以下项目发消息：{other_projects}。\n"
+                    f"发送消息后立即返回，对方会在下次处理时收到。\n"
+                    f"收到的消息会自然出现在对话中，不需要查收件箱。"
                 )
             }
         )
@@ -849,44 +792,60 @@ projects:
 
 ---
 
-## 14. 并发与递归控制
+## 14. 并发与消息流控制
 
 ### 14.1 串行保证
 
 **原则 P2** 要求全局串行。sextant 通过以下方式保证：
 
 1. 单线程事件循环
-2. `send_message` 内部 `await target_client.query()` → `await receive_response()` —— 整个流程是阻塞的
-3. 用户切换项目前必须 `Ctrl+C` 退出当前 chat → 此时没有活跃的 `send_message` 调用
-4. 没有后台任务、没有 `asyncio.create_task`、没有消息队列
+2. 只有一个 Agent 处于"活跃"状态（用户当前 REPL 项目）
+3. Agent 间通信通过 mailbox 异步解耦——不需要并发处理
+4. 用户切换项目用 `Ctrl+C`，每次只有一个 Agent 在处理 prompt
 
-### 14.2 递归防护
+### 14.2 Mailbox 轮询（替代递归防护）
 
-当 ncp 正在处理 acp 的消息时，ncp 可能调用 `send_message(to="acp")` 作为回复。但 acp 此时正在阻塞等待 ncp 的 `send_message` 返回——如果再注入 acp，会形成死锁。
+旧模型依赖 `_call_stack` 防止 A→B→A 的递归死锁。新模型中：
 
-**解决方案**：`_call_stack` 机制。
+```
+send_message 不再阻塞 → 不存在"A 等 B，B 又调 A"的死锁场景
 
-```python
-_call_stack: list[str] = []  # 当前正在等待回复的 project_id 栈
-
-async def send_message_handler(args):
-    from_id = current_project_id()
-    to_id = args["to"]
-
-    # 递归检测：如果目标正在等待调用方回复
-    if _call_stack and _call_stack[-1] == to_id:
-        # 这就是对方在等的回复，直接作为 return value
-        return {"reply": args["body"], "from": from_id}
-
-    # 正常处理
-    _call_stack.append(from_id)
-    try:
-        # ... 注入目标 + 等待回复
-    finally:
-        _call_stack.pop()
+Agent 的每次 prompt 由 mailbox 拼装：
+  prompt = [mailbox 待处理消息] + [用户输入]
+  
+Agent 处理完 prompt 后：
+  - 如果调了 send_message → 写入对方 mailbox
+  - 输出文本 → 自动写回相关消息的发送方 mailbox
 ```
 
-**逻辑含义**：当 A 在等 B 的回话时，B 调用 `send_message(to="A")` —— 此时 B 不需要再注入 A，"B 的这句话"本身就是 A 在等的回复。
+**核心变化**：从一个"同步调用树"变成"消息驱动的状态机"。Agent 的每次 turn 是独立的，不需要维护跨 turn 的调用栈。
+
+### 14.3 后台 Agent 的触发时机
+
+| 事件 | sextant 行为 |
+|------|-------------|
+| 用户输入 prompt（当前项目） | mailbox 待处理消息 + 用户输入 → 注入当前项目 Agent |
+| 用户切换到某项目（Ctrl+C → `sextant chat X`） | 查询 X 的 mailbox → 有消息则注入 |
+| 某项目 Agent 的输出写回 mailbox | 更新消息状态，不做额外动作（不自动触发 Agent） |
+
+**设计意图**：Agent 只在获得 prompt 时处理消息。不需要轮询、不需要后台唤醒、不需要定时器。用户操作（输入/切项目）是唯一的触发源。
+
+### 14.4 Mailbox 数据结构
+
+```python
+# 消息记录 (JSONL)
+{
+  "msg_id": "m_20260525_001",
+  "timestamp": "2026-05-25T15:30:00+08:00",
+  "from": "acp",
+  "to": "ncp",
+  "subject": "同步协议变更",
+  "body": "...",
+  "status": "replied",       # pending | replied | error
+  "reply": "ncp 的完整输出",  # None when pending
+  "reply_timestamp": "..."   # None when pending
+}
+```
 
 ---
 
@@ -900,7 +859,7 @@ async def send_message_handler(args):
 | 目标 Agent 的 `query()` 抛出异常 | 捕获异常，返回 `{"reply": f"(错误: {e})"}` |
 | 会话恢复失败 | 创建新会话（降级），日志警告 |
 | CC SDK 子进程异常退出 | 尝试重启子进程，失败则将该 project 标记为不可用 |
-| 用户 `Ctrl+C` 中断 `repl_ask_user` | 返回 `"(用户未回复)"`，不破坏调用链 |
+| 用户 `Ctrl+C` 中断 `canUseTool` 审批 | 返回拒绝（`PermissionResultDeny`），不破坏调用链 |
 | mailbox 写入失败 | 日志错误，不阻塞主流程（消息路由优先于持久化） |
 
 ### 15.2 降级策略
@@ -959,9 +918,46 @@ E2E 验证通过：acp → send_message(to="ncp") → ncp 回复 → acp 收到�
 
 E2E 验证通过：acp → send_message(to="__user__") → mock 用户输入 → acp 继续。
 
-### 16.4 Phase 4：TUI 思考可见化（进行中）
+### 16.4 Phase 4：TUI 思考可见化 ✅
 
-详见 [第 17.4 节](#174-phase-4tui-思考可见化--打磨预估8-小时)。
+详见 [第 17.4 节](#174-phase-4tui-思考可见化--打磨)。Phase 4 全部 6 个 task 已完成。
+
+### 16.5 Phase 5：权限审批 + 状态栏 + 会话恢复 ✅
+
+**完成日期**: 2026-05-24
+
+交付：
+- `canUseTool` 回调替代废弃的 `permission_prompt_tool_name`
+- `send_message` 硬编码放行，不触发审批
+- `AskUserQuestion` 格式化选项展示
+- 状态栏 `[acp] acceptEdits · deepseek-v4-pro · 3m12s`
+- `/perm` 和 `/model` 运行时命令
+- `--resume` 会话恢复
+
+### 16.6 Phase 6：Mailbox 驱动架构重构（待开发）
+
+**目标**: 将 send_message 从同步阻塞改为 mailbox 驱动异步模型。
+
+**变更范围**:
+
+| 模块 | 变更 |
+|------|------|
+| `send_message.py` | 去掉 `route_message` 调用；只写 mailbox + 返回 ack |
+| `session.py` | 去掉 `route_message`、`_call_stack`、`_prompt_user`（迁移到 canUseTool）；新增 `_build_prompt_with_mailbox()` |
+| `mailbox.py` | 扩展：`record_reply()`、`get_pending()`、`get_replies_for()` |
+| `chat.py` | prompt 组装改为 `mailbox.get_pending() + user_input`；输出自动回写 mailbox |
+| system prompt | 去掉"请用 send_message 回复"指令；去掉 `__user__` 相关内容 |
+
+**开发顺序**:
+1. Mailbox 扩展（`record_reply`、`get_pending`）— 1h
+2. `send_message.py` 改为投递即忘 — 0.5h
+3. `session.py` 去掉 `route_message`/`_call_stack`，新增 prompt 组装 — 1.5h
+4. `chat.py` prompt 组装 + 输出回写 — 1h
+5. System prompt 精简 — 0.5h
+6. E2E 测试适配 + 三项目验证 — 1h
+7. 清理旧代码（`route_message`、`_prompt_user` 中 `__user__` 相关）— 0.5h
+
+**预估**: 6 小时
 
 ---
 
@@ -978,7 +974,9 @@ Commits: `ad07c0e`。详见 [第 16.2 节](#162-phase-2多-agent--send_message-)
 **Phase 3：__user__ 特殊收件人** ✅
 Commits: `3f09c63`（⚠️ 本地未 push）。详见 [第 16.3 节](#163-phase-3__user__-真人交互-)。
 
-**Phase 4：TUI 思考可见化 + 打磨**（预估：8 小时）
+**Phase 6：Mailbox 驱动架构重构**（预估：6 小时）
+
+详见 [第 16.6 节](#166-phase-6mailbox-驱动架构重构待开发)。
 
 ### 17.2 技术验证点（已全部验证）
 
@@ -1124,10 +1122,10 @@ projects:
   - id: xcp    # 客户端（Rust）
 ```
 
-测试场景（按 PRD 第 11 章）：
-1. acp 改协议 → 通知 ncp → ncp 有疑问 → 问 xcp → xcp 回复 → ncp 完成 → acp 汇报
-2. Agent 间递归防护：A→B→C→A 场景
-3. `__user__` 升级：C 拿不到有效回答时向用户求助
+测试场景：
+1. acp → ncp → 用户切到 ncp → 处理消息 → 问用户问题（canUseTool）→ 输出回写 acp mailbox
+2. acp → ncp + acp → xcp → 用户切到各项目查看 → 汇总回复
+3. 三项目消息往返：A→B→C→A 场景，验证 mailbox 正确关联回复
 
 #### 17.4.4 Phase 4 优先级
 
@@ -1152,16 +1150,17 @@ projects:
 | Q2 | `query()` 调用期间 SDK 内部是否有并发保护？ | 低 | ✅ 已验证 | 串行模型，不存在并发访问 |
 | Q3 | 3-4 个 CC Agent 子进程的内存开销？ | 低 | ✅ 已验证 | 实测 2 agent ≈ 400MB，符合预期 |
 | Q4 | `continue_conversation=True` 的持久化路径？ | 中 | ✅ 已验证 | SDK 自动管理，重启后恢复成功 |
-| Q5 | 长时间 `send_message` 时用户能否 Ctrl+C？ | 高 | ⚠️ 待验证 | Phase 4 通过耗时显示提供反馈；interrupt 机制待验证 |
+| Q5 | Mailbox JSONL 文件在并发写入时的一致性？ | 低 | ⚠️ 待验证 | 单线程模型天然串行；同一文件多项目并发写入需确认 |
 | Q6 | Agent 会不会填错 `to` 参数？ | 低 | ✅ 已验证 | system_prompt 注入 + 项目列表，E2E 测试中从未填错 |
-| Q7 | `send_message` 等待时 SDK 是否有超时？ | 中 | ⚠️ 待验证 | 实测未见超时。Phase 4 建议加超时保护 |
+| Q7 | 后台 Agent 的 canUseTool 审批请求如何排队？ | 中 | ⚠️ 待设计 | Phase 6 需设计：是入队到 mailbox 还是直接拒绝？ |
 
-**Phase 4 新增风险**：
+**Phase 6 新增风险**：
 
 | # | 问题 | 风险等级 | 缓解措施 |
 |---|------|----------|----------|
-| Q8 | `ThinkingBlock` 在 DeepSeek v4（非推理模型）下不出现 | 低 | 实现上不做假设，有则渲染、无则跳过 |
-| Q9 | `ToolResultBlock` 的 `tool_use_id` 能否可靠关联到 `ToolUseBlock` | 低 | SDK 类型已包含此字段，待实测确认 |
+| Q8 | Agent 异步通信后用户忘记切回查看回复 | 中 | 状态栏提示"N 条新回复"；`sextant status` 显示各项目待处理消息数 |
+| Q9 | 旧同步模型的 Agent 会话与新 mailbox 模型的兼容性 | 低 | 改 system prompt 即可；Agent 行为由 prompt 驱动，不依赖旧语义 |
+| Q10 | send_message 返回值从 `{reply}` 变成 `{status:sent}` 后 Agent 行为变化 | 中 | Agent 由 system prompt 告知"发送即完成，不要等回复"；E2E 测试验证
 
 ---
 
@@ -1179,9 +1178,9 @@ projects:
 | **MCP (Model Context Protocol)** | Agent tool 的协议标准 |
 | **MCP tool** | 注册到 Agent 的可调用工具 |
 | **REPL** | Read-Eval-Print Loop，交互式命令行界面 |
-| **mailbox** | 消息持久化存储（文件系统） |
-| **`__user__`** | 特殊收件人标识，代表真人用户 |
-| **send_message** | 唯一的 MCP tool，用于 Agent 间同步消息传递 |
+| **mailbox** | 消息持久化存储（JSONL 文件），sextant 的唯一真相源。所有 Agent 间消息 + 回复全部流经 mailbox |
+| **send_message** | 唯一的 MCP tool，用于 Agent 间异步消息传递。写入 mailbox 后立即返回，不阻塞 |
+| **canUseTool** | CC SDK 的标准用户交互回调。sextant 用它统一处理工具审批 + AskUserQuestion |
 
 ### 19.2 相关文档
 
@@ -1201,6 +1200,7 @@ projects:
 | 1.0 | 2026-05-24 | 初始 PRD，基于 final_design_v4.md |
 | 1.1 | 2026-05-24 | 新增第11章「端到端协作场景」；章节号全部后移 |
 | 1.2 | 2026-05-24 | Phase 1-3 完成；新增第16章「开发进度」；Phase 4 详细规格（TUI 思考可见化 + 6 个 task）；开放问题更新（Q2-4,Q6 ✅，Q5,Q7 ⚠️，新增 Q8-9）；SDK 踩坑补充 |
+| 1.3 | 2026-05-25 | **重大架构变更**：消息模型从同步阻塞改为 mailbox 驱动异步。P4 从"send_message 是同步的"改为"投递即忘"。去掉 `__user__` 特殊收件人，用户交互全部通过 `canUseTool`。去掉 `_call_stack` / 递归防护 / `route_message`。重写第5、8、10、11、12、14节；新增 Phase 6 实现计划 |
 
 ### 19.4 SDK 参考文档
 

@@ -1,7 +1,8 @@
 """CC Agent SDK session manager.
 
-Phase 2: manages multiple ClaudeSDKClient instances, each with an
-in-process MCP server that provides the ``send_message`` tool.
+v2.0: mailbox-driven architecture.  Agents communicate via send_message →
+mailbox; /chat command delivers pending messages as drafts.  No more
+synchronous route_message, call_stack, or recursion protection.
 """
 
 from __future__ import annotations
@@ -16,8 +17,6 @@ from typing import TYPE_CHECKING
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
-    ResultMessage,
-    SystemMessage,
     create_sdk_mcp_server,
 )
 from claude_agent_sdk.types import (
@@ -61,7 +60,7 @@ class SessionManager:
 
         async with SessionManager(config) as mgr:
             mgr.set_current_project("acp")
-            async for msg in mgr.query("hello"):
+            async for msg in mgr.query("acp", "hello"):
                 ...
 
     All agents are started and shut down together.  Each agent gets
@@ -73,15 +72,11 @@ class SessionManager:
         self._resume = resume
         # project_id → ClaudeSDKClient
         self._clients: dict[str, ClaudeSDKClient] = {}
-        # Stack of project_ids currently blocked on send_message.
-        # Top-of-stack is the project that will receive the next direct
-        # reply.  Used for recursion protection (P4).
-        self._call_stack: list[str] = []
-        # Currently active project (for send_message to know its caller).
+        # Currently active project (the one the user is chatting with).
         self._current_project: str | None = None
-        # Set by the REPL to cancel a __user__ prompt (Ctrl+C).
+        # Set by the REPL to cancel a user prompt (Ctrl+C).
         self.cancel_event: asyncio.Event = asyncio.Event()
-        # P4-4: persistent message log
+        # v2.0: Mailbox is the single source of truth for messages.
         self._mailbox = Mailbox()
 
     # -- public ----------------------------------------------------
@@ -90,26 +85,33 @@ class SessionManager:
     def current_project(self) -> str | None:
         return self._current_project
 
+    @property
+    def project_ids(self) -> list[str]:
+        return list(self._clients.keys())
+
+    @property
+    def mailbox(self) -> Mailbox:
+        return self._mailbox
+
     def set_current_project(self, project_id: str) -> None:
         if project_id not in self._clients:
             raise KeyError(f"Unknown project: {project_id}")
         self._current_project = project_id
 
-    @property
-    def call_stack(self) -> list[str]:
-        return list(self._call_stack)
-
     # -- context manager -------------------------------------------
 
     async def __aenter__(self) -> "SessionManager":
         # 1. Build the send_message tool (import deferred to break circular dep)
-        from .send_message import send_message_tool
+        from .send_message import send_message_tool, set_mailbox
 
         mcp_server = create_sdk_mcp_server(
             name="sextant",
-            version="0.1.0",
+            version="0.2.0",
             tools=[send_message_tool],
         )
+
+        # Wire the mailbox singleton
+        set_mailbox(self._mailbox)
 
         # ── canUseTool: intercept ALL tool calls for user approval ──
         manager_ref = self  # closure capture
@@ -127,12 +129,11 @@ class SessionManager:
 
             # All other tools → ask user
             desc = _format_tool_for_user(tool_name, input_data)
-            result = await manager_ref._prompt_user(
+            reply = await manager_ref._prompt_user(
                 from_id=manager_ref._current_project or "?",
                 subject=f"允许 {tool_name}?",
                 body=desc,
             )
-            reply = result.get("reply", "").strip().lower()
             if reply in ("y", "yes", "是", "允许", "可以", "ok", "好"):
                 return PermissionResultAllow(updated_input=input_data)
             return PermissionResultDeny(message=f"用户拒绝了 {tool_name}")
@@ -144,10 +145,10 @@ class SessionManager:
         for project in self._config.projects:
             opts = ClaudeAgentOptions(
                 cwd=str(project.directory),
-                permission_mode=project.permission_mode or self._config.permission_mode or "acceptEdits",
+                permission_mode=project.permission_mode or self._config.permission_mode or "default",
                 setting_sources=["project"],
                 continue_conversation=True,
-                resume=self._resume,  # P5: session resume
+                resume=self._resume,
                 env=_load_claude_env(),
                 mcp_servers={"sextant": mcp_server},
                 can_use_tool=can_use_tool,
@@ -192,104 +193,46 @@ class SessionManager:
     def get_client(self, project_id: str) -> ClaudeSDKClient:
         return self._clients[project_id]
 
-    # -- send_message routing (called by the MCP tool handler) ----
+    # -- mailbox prompt assembly (v2.0) ----------------------------
 
-    async def route_message(
-        self, from_id: str, to: str, subject: str, body: str
-    ) -> dict:
-        """Inject a message into the target agent and wait for the reply.
+    def build_mailbox_draft(self, project_id: str) -> str | None:
+        """Build a draft prompt from pending mailbox messages for *project_id*.
 
-        Returns a dict suitable as an MCP tool result, e.g.::
-
-            {"reply": "...", "from": "ncp"}
-
-        Handles:
-        - Recursion protection: if **to** is anywhere in the call stack,
-          treat the message as the awaited reply and return immediately.
-        - ``__user__``: defers to Phase 3 (returns a placeholder for now).
+        Returns None if there are no pending messages.
         """
-        if to == "__user__":
-            result = await self._prompt_user(from_id, subject, body)
-            self._mailbox.record(
-                from_id=from_id, to=to, subject=subject, body=body,
-                reply=result["reply"], elapsed=0,  # user time not measured
-            )
-            return result
+        pending = self._mailbox.get_pending(to=project_id)
+        if not pending:
+            return None
 
-        if to not in self._clients:
-            return {"reply": f"错误: 项目 '{to}' 不存在", "from": "system"}
+        lines = [f"你有 {len(pending)} 条待处理消息：", ""]
+        for msg in pending:
+            lines.append(f"[来自 {msg['from']}] {msg['subject']}")
+            lines.append("")
+            lines.append(msg["body"])
+            lines.append("")
 
-        # --- recursion protection ---
-        if to in self._call_stack:
-            # The target is currently blocked waiting for a reply.
-            # This message IS the reply — return it directly.
-            self._mailbox.record(
-                from_id=from_id, to=to, subject=subject, body=body,
-                reply=body, elapsed=0,  # instant recursion resolution
-            )
-            return {"reply": body, "from": from_id}
+        lines.append("─" * 40)
+        return "\n".join(lines)
 
-        # --- normal injection ---
-        self._call_stack.append(from_id)
-        t0 = time.time()
-        try:
-            prompt = (
-                f"📬 来自 **{from_id}** 的消息\n\n"
-                f"**主题**: {subject}\n\n"
-                f"{body}\n\n"
-                f"---\n"
-                f"请处理此消息。完成后，调用 "
-                f"`send_message(to='{from_id}', subject='Re: {subject}', body='你的完整回复')`。"
-            )
+    def mark_mailbox_delivered(self, project_id: str) -> None:
+        """Mark all pending messages for *project_id* as delivered."""
+        pending = self._mailbox.get_pending(to=project_id)
+        if pending:
+            self._mailbox.mark_delivered([m["msg_id"] for m in pending])
 
-            target = self._clients[to]
-            await target.query(prompt)
+    # -- user prompt (used by canUseTool) ---------------------------
 
-            # Collect the full output
-            parts: list[str] = []
-            async for msg in target.receive_response():
-                if hasattr(msg, "content"):
-                    for block in msg.content:
-                        if hasattr(block, "text") and block.text:
-                            parts.append(block.text)
-                elif isinstance(msg, ResultMessage):
-                    pass  # end of stream
-
-            reply_text = "".join(parts).strip() or "(目标 Agent 无文本输出)"
-            elapsed = time.time() - t0
-            # P4-3: show reply status with duration
-            print(f"\n     ✓ {to} 已回复 [{elapsed:.1f}s]", flush=True)
-            # P4-4: persist to mailbox
-            self._mailbox.record(
-                from_id=from_id, to=to, subject=subject, body=body,
-                reply=reply_text, elapsed=elapsed,
-            )
-            return {"reply": reply_text, "from": to}
-
-        except Exception as exc:
-            elapsed = time.time() - t0
-            print(f"\n     ❌ {to} [{elapsed:.1f}s]", flush=True)
-            return {"reply": f"(错误: {exc})", "from": "system"}
-        finally:
-            self._call_stack.pop()
-
-    # -- __user__ prompt (Phase 3) ----------------------------------
-
-    async def _prompt_user(self, from_id: str, subject: str, body: str) -> dict:
+    async def _prompt_user(self, from_id: str, subject: str, body: str) -> str:
         """Display a prompt to the human user and wait for their reply.
 
         Races ``cancel_event`` against the input future so Ctrl+C skips
-        gracefully instead of leaving the REPL stuck.
+        gracefully.
         """
-        # Print the prompt to stdout (won't interleave with streaming
-        # because the agent stream is paused while this tool call is
-        # in-flight).
         print(flush=True)
-        print("─" * 50, flush=True)
-        print(f"🤔 **{from_id}** 想知道：", flush=True)
-        print(f"   {subject}", flush=True)
+        print("─" * 40, flush=True)
+        print(f"🤔 **{from_id}**：{subject}", flush=True)
         print(f"   {body}", flush=True)
-        print("─" * 50, flush=True)
+        print("─" * 40, flush=True)
 
         self.cancel_event.clear()
         loop = asyncio.get_running_loop()
@@ -302,26 +245,20 @@ class SessionManager:
 
         if input_future in done and not self.cancel_event.is_set():
             try:
-                reply = input_future.result()
-                return {"reply": reply, "from": "__user__"}
+                return input_future.result().strip()
             except EOFError:
-                return {"reply": "(用户未回复)", "from": "__user__"}
+                return "n"
         else:
-            # Cancelled (Ctrl+C)
             input_future.cancel()
-            print("\n  ⏸ (用户跳过)", flush=True)
-            return {"reply": "(用户未回复)", "from": "__user__"}
+            print("\n  ⏸ (已取消)", flush=True)
+            return "n"
 
     # -- AskUserQuestion handler (for canUseTool) --------------------
 
     async def _handle_ask_user_question(
         self, input_data: dict
     ) -> PermissionResultAllow:
-        """Handle CC's AskUserQuestion tool via canUseTool.
-
-        Formats each question with its options and prompts the user.
-        Returns PermissionResultAllow with answers.
-        """
+        """Handle CC's AskUserQuestion tool via canUseTool."""
         questions = input_data.get("questions", [])
         answers: dict[str, str] = {}
 
@@ -335,12 +272,11 @@ class SessionManager:
                 desc = opt.get("description", "")
                 lines.append(f"  {i}. {opt['label']}" + (f" — {desc}" if desc else ""))
 
-            result = await self._prompt_user(
+            reply = await self._prompt_user(
                 from_id=self._current_project or "?",
-                subject=f"🤔 {header}",
+                subject=header,
                 body="\n".join(lines),
             )
-            reply = result.get("reply", "").strip()
             # Try numeric selection first, fall back to free-text
             try:
                 idx = int(reply) - 1
@@ -388,7 +324,11 @@ def _format_tool_for_user(tool_name: str, input_data: dict) -> str:
 
 
 def _build_system_prompt(project_id: str, projects) -> str:
-    """Build the appended system prompt for a project's agent."""
+    """Build the appended system prompt for a project's agent.
+
+    v2.0: no __user__ concept, no "please reply with send_message" instructions.
+    Agents just need to know send_message exists for outgoing messages.
+    """
     other = [p.id for p in projects if p.id != project_id]
     lines = [
         f"你的项目是 **{project_id}**。",
@@ -397,16 +337,12 @@ def _build_system_prompt(project_id: str, projects) -> str:
     if other:
         other_list = "、".join(f"`{o}`" for o in other)
         lines.append(
-            f"你可以通过 `send_message(to, subject, body)` 向以下合作项目发送消息并等待回复："
-            f"{other_list}。"
+            f"你可以通过 `send_message(to, subject, body)` 向以下合作项目发送消息："
+            f"{other_list}。消息发送后对方会在下次查看时收到。"
         )
-    else:
-        lines.append("当前没有其他合作项目。")
-
     lines.extend([
         "",
-        "向 `__user__` 发送消息可以询问真人用户。",
-        "收到的消息会直接显示在对话中。",
-        "如果连续两次无法从当前对话方获得有效回复，请向 `__user__` 发起升级询问。",
+        "仅在用户明确要求时使用 send_message 发送消息给其他项目。",
+        "用户会通过弹窗审批你的操作和回答问题。",
     ])
     return "\n".join(lines)

@@ -1,13 +1,13 @@
 """Persistent message log for sextant agent communication.
 
-Each ``send_message`` call is recorded as a JSON line in
-``~/.sextant/mailbox/YYYY-MM-DD.jsonl``.  The log survives session
-restarts and can be queried via ``sextant mailbox``.
+v2.0: mailbox is the single source of truth for inter-agent messages.
+send_message writes here; /chat reads from here.
 """
 
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,9 +18,10 @@ class Mailbox:
     Usage::
 
         mbox = Mailbox()
-        mbox.record("acp", "ncp", "同步协议", "...", "已完成", 3.2)
-        for entry in mbox.query(project="acp", limit=10):
-            print(entry)
+        mbox.record(from_id="acp", to="ncp", subject="...", body="...")
+        for entry in mbox.get_pending(to="ncp"):
+            print(entry["body"])
+        mbox.mark_delivered(["m_001", "m_002"])
     """
 
     def __init__(self, base_dir: str | Path | None = None) -> None:
@@ -28,6 +29,9 @@ class Mailbox:
             base_dir = Path.home() / ".sextant" / "mailbox"
         self._base = Path(base_dir)
         self._base.mkdir(parents=True, exist_ok=True)
+        # In-memory set of delivered msg_ids for this session.
+        # On restart, previously-delivered messages may show again — acceptable.
+        self._delivered: set[str] = set()
 
     # -- write -------------------------------------------------------
 
@@ -38,34 +42,78 @@ class Mailbox:
         to: str,
         subject: str,
         body: str,
-        reply: str,
-        elapsed: float,
-    ) -> None:
-        """Append one message-exchange record."""
+    ) -> str:
+        """Append one outgoing message. Returns the msg_id."""
+        msg_id = f"m_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         entry = {
+            "msg_id": msg_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "from": from_id,
             "to": to,
             "subject": subject,
             "body": body,
-            "reply": reply,
-            "elapsed_ms": round(elapsed * 1000),
+            "status": "pending",
         }
         with open(self._today_file(), "a") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return msg_id
 
     # -- read --------------------------------------------------------
+
+    def get_pending(self, to: str) -> list[dict]:
+        """Return pending (undelivered) messages for a project, oldest first."""
+        results: list[dict] = []
+        file = self._today_file()
+        if not file.exists():
+            return results
+
+        with open(file) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    entry.get("to") == to
+                    and entry.get("status") == "pending"
+                    and entry.get("msg_id") not in self._delivered
+                ):
+                    results.append(entry)
+
+        return results
+
+    def get_pending_count(self, to: str) -> int:
+        """Return count of pending messages without loading all content."""
+        count = 0
+        file = self._today_file()
+        if not file.exists():
+            return 0
+
+        with open(file) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    entry.get("to") == to
+                    and entry.get("status") == "pending"
+                    and entry.get("msg_id") not in self._delivered
+                ):
+                    count += 1
+
+        return count
+
+    def mark_delivered(self, msg_ids: list[str]) -> None:
+        """Mark messages as delivered (in-memory — survives only this session)."""
+        self._delivered.update(msg_ids)
 
     def query(
         self,
         project: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
-        """Return recent entries, newest first.
-
-        *project* filters to messages where ``from`` or ``to`` matches.
-        Only today's file is scanned by default.
-        """
+        """Return recent entries, newest first. For CLI `sextant mailbox`."""
         results: list[dict] = []
         file = self._today_file()
         if not file.exists():
@@ -90,6 +138,28 @@ class Mailbox:
             key=lambda p: p.name,
             reverse=True,
         )
+
+    def all_pending_counts(self) -> dict[str, int]:
+        """Return {project_id: pending_count} for all projects with pending messages today."""
+        counts: dict[str, int] = {}
+        file = self._today_file()
+        if not file.exists():
+            return counts
+
+        with open(file) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    entry.get("status") == "pending"
+                    and entry.get("msg_id") not in self._delivered
+                ):
+                    to = entry.get("to", "?")
+                    counts[to] = counts.get(to, 0) + 1
+
+        return counts
 
     # -- helpers -----------------------------------------------------
 
