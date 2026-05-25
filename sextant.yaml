@@ -12,3 +12,9 @@ projects:
     # allowed_tools: [Read, Write, Edit, Bash]
     # Optional: per-project permission override
     # permission_mode: default
+  - id: acp
+    directory: /tmp/acp
+  - id: ncp
+    directory: /tmp/ncp
+  - id: xcp
+    directory: /tmp/xcp

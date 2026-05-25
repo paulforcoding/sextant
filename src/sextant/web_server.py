@@ -257,9 +257,24 @@ async def _agent_query(project_id: str, prompt: str, q: queue.Queue):
             setting_sources=["project"],
             continue_conversation=True,
             env=env,
+            mcp_servers={"sextant": _get_mcp_server()},
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": (
+                    f"你的项目是 **{project_id}**。\n\n"
+                    f"可以通过 `send_message(to, subject, body)` 向其他项目发送消息。\n"
+                    f"可用项目: {', '.join(p for p in _project_ids if p != project_id)}。\n"
+                    f"消息发送后对方会在下次查看时收到。仅在用户明确要求时使用。"
+                ),
+            },
         )
 
         async with ClaudeSDKClient(options=opts) as client:
+            # Set sender identity for send_message tool
+            if _mgr:
+                _mgr.set_current_project(project_id)
+
             # Build prompt with mailbox messages
             full_prompt = _build_full_prompt(project_id, prompt)
 
@@ -274,6 +289,23 @@ async def _agent_query(project_id: str, prompt: str, q: queue.Queue):
 
     except Exception as e:
         q.put({"type": "error", "message": str(e)})
+
+
+def _get_mcp_server():
+    """Create an MCP server with the send_message tool (cached)."""
+    if _get_mcp_server._cached is not None:
+        return _get_mcp_server._cached
+    from claude_agent_sdk import create_sdk_mcp_server
+    from .send_message import send_message_tool
+    server = create_sdk_mcp_server(
+        name="sextant",
+        version="0.2.0",
+        tools=[send_message_tool],
+    )
+    _get_mcp_server._cached = server
+    return server
+
+_get_mcp_server._cached = None
 
 
 def _build_full_prompt(project_id: str, user_prompt: str) -> str:
