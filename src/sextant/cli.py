@@ -60,6 +60,26 @@ def main() -> None:
     # sextant status
     subparsers.add_parser("status", help="Show project session status")
 
+    # sextant web
+    web_parser = subparsers.add_parser("web", help="Start web UI")
+    web_parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="Bind address (default: 127.0.0.1)",
+    )
+    web_parser.add_argument(
+        "--port", type=int, default=5008,
+        help="Port (default: 5008)",
+    )
+    web_parser.add_argument(
+        "-c", "--config",
+        default="sextant.yaml",
+        help="Path to sextant.yaml (default: ./sextant.yaml)",
+    )
+    web_parser.add_argument(
+        "--debug", action="store_true",
+        help="Enable Flask debug mode",
+    )
+
     args = parser.parse_args()
 
     if args.command == "chat":
@@ -68,6 +88,8 @@ def main() -> None:
         _cmd_mailbox(args)
     elif args.command == "status":
         _cmd_status(args)
+    elif args.command == "web":
+        _cmd_web(args)
     else:
         parser.print_help()
         sys.exit(1)
@@ -132,6 +154,13 @@ def _cmd_status(args) -> None:
                 last_active = "?"
 
         print(f"{proj.id:<12s} {pending_str:>6s} {status:<6s} {last_active}")
+
+
+def _cmd_web(args) -> None:
+    """Start the sextant web UI."""
+    from .web_server import run_web
+    print(f"sextant web · http://{args.host}:{args.port}")
+    run_web(config_path=args.config, host=args.host, port=args.port, debug=args.debug)
 
 
 async def _cmd_chat(args) -> None:

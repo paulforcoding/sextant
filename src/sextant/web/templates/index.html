@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sextant</title>
+<style>
+  :root {
+    --bg: #0d0d12;
+    --sidebar: #13131b;
+    --card: #1a1a26;
+    --card-hover: #22223a;
+    --border: #25253a;
+    --text: #c8c8d4;
+    --text-dim: #6b6b80;
+    --accent: #7c8cf8;
+    --accent-glow: #9dacff;
+    --user-bubble: #252540;
+    --agent-bubble: #1a1e30;
+    --tool-bg: #141420;
+    --thinking: #4a4a60;
+    --success: #4ade80;
+    --error: #f87171;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --transition: 0.2s ease;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    width: 280px;
+    min-width: 280px;
+    background: var(--sidebar);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 0;
+  }
+
+  .sidebar-header {
+    padding: 0 20px 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+
+  .sidebar-header h1 {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: #fff;
+  }
+
+  .sidebar-header .sub {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    font-family: "SF Mono", "Fira Code", monospace;
+  }
+
+  .sidebar-section {
+    padding: 8px 20px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+
+  .sidebar-list {
+    list-style: none;
+    padding: 0 12px;
+  }
+
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--transition);
+    margin-bottom: 2px;
+    font-size: 14px;
+  }
+
+  .sidebar-item:hover { background: var(--card-hover); }
+  .sidebar-item.active { background: var(--card); color: #fff; }
+
+  .sidebar-item .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .sidebar-item .badge {
+    margin-left: auto;
+    background: var(--accent);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 10px;
+    min-width: 20px;
+    text-align: center;
+  }
+
+  .sidebar-item .icon {
+    font-size: 16px;
+    flex-shrink: 0;
+    width: 20px;
+    text-align: center;
+  }
+
+  .sidebar-footer {
+    margin-top: auto;
+    padding: 12px 20px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  /* ── Main ── */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  /* ── Header ── */
+  .header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--bg);
+  }
+
+  .header h2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #fff;
+  }
+
+  .header .status {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: "SF Mono", "Fira Code", monospace;
+  }
+
+  /* ── Chat area ── */
+  .chat-area {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .chat-area::-webkit-scrollbar { width: 6px; }
+  .chat-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ── Messages ── */
+  .msg {
+    max-width: 80%;
+    padding: 12px 16px;
+    border-radius: var(--radius);
+    line-height: 1.6;
+    font-size: 14px;
+    animation: fadeIn 0.2s ease;
+    word-break: break-word;
+  }
+
+  .msg.user {
+    align-self: flex-end;
+    background: var(--user-bubble);
+    border: 1px solid var(--border);
+    border-bottom-right-radius: 4px;
+  }
+
+  .msg.agent {
+    align-self: flex-start;
+    background: var(--agent-bubble);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+
+  .msg.thinking {
+    align-self: flex-start;
+    background: transparent;
+    border: none;
+    color: var(--thinking);
+    font-style: italic;
+    font-size: 13px;
+    padding: 4px 8px;
+  }
+
+  .msg.tool {
+    align-self: flex-start;
+    background: var(--tool-bg);
+    border: 1px solid var(--border);
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 13px;
+    padding: 8px 14px;
+  }
+
+  .msg.tool .tool-name {
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .msg.tool .tool-detail {
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+
+  .msg.tool-result {
+    align-self: flex-start;
+    background: var(--tool-bg);
+    border: 1px solid var(--border);
+    font-size: 13px;
+    padding: 8px 14px;
+    color: var(--success);
+  }
+
+  .msg.tool-result.error { color: var(--error); }
+
+  .msg .role-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* ── Input ── */
+  .input-area {
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 12px;
+    background: var(--bg);
+  }
+
+  .input-area textarea {
+    flex: 1;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    padding: 12px 16px;
+    font-size: 14px;
+    font-family: inherit;
+    resize: none;
+    min-height: 44px;
+    max-height: 120px;
+    outline: none;
+    transition: border var(--transition);
+  }
+
+  .input-area textarea:focus { border-color: var(--accent); }
+
+  .input-area button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    padding: 0 20px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--transition);
+  }
+
+  .input-area button:hover { background: var(--accent-glow); }
+  .input-area button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── Mailbox view ── */
+  .mailbox-view {
+    padding: 20px 24px;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .mailbox-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 12px;
+    transition: background var(--transition);
+  }
+
+  .mailbox-card:hover { background: var(--card-hover); }
+
+  .mailbox-card .mb-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+
+  .mailbox-card .mb-from-to {
+    font-weight: 600;
+    color: #fff;
+    font-size: 14px;
+  }
+
+  .mailbox-card .mb-arrow { color: var(--accent); margin: 0 6px; }
+
+  .mailbox-card .mb-time {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: "SF Mono", "Fira Code", monospace;
+  }
+
+  .mailbox-card .mb-subject {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--accent-glow);
+    margin-bottom: 6px;
+  }
+
+  .mailbox-card .mb-body {
+    font-size: 13px;
+    color: var(--text-dim);
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+
+  .mailbox-card .mb-status {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 8px;
+    font-weight: 600;
+  }
+
+  .mb-status.pending { background: rgba(124, 140, 248, 0.15); color: var(--accent); }
+  .mb-status.delivered { background: rgba(74, 222, 128, 0.15); color: var(--success); }
+
+  /* ── Empty state ── */
+  .empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    gap: 12px;
+  }
+
+  .empty .icon { font-size: 48px; }
+  .empty h3 { font-size: 18px; color: #fff; }
+  .empty p { font-size: 14px; }
+
+  /* ── Animations ── */
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  .streaming-indicator {
+    display: inline-block;
+    width: 8px; height: 8px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: pulse 0.8s infinite;
+    margin-right: 6px;
+  }
+
+  /* ── Cost bar ── */
+  .cost-bar {
+    font-size: 12px;
+    color: var(--text-dim);
+    padding: 4px 16px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    align-self: flex-start;
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════ SIDEBAR ═══════════ -->
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h1>sextant</h1>
+    <div class="sub">multi-agent cockpit</div>
+  </div>
+
+  <div class="sidebar-section">Agents</div>
+  <ul class="sidebar-list" id="agent-list">
+    <li class="sidebar-item" style="color:var(--text-dim)">加载中...</li>
+  </ul>
+
+  <div class="sidebar-section">Messages</div>
+  <ul class="sidebar-list">
+    <li class="sidebar-item" data-view="mailbox" onclick="showMailbox()">
+      <span class="icon">📬</span> Mailbox
+    </li>
+  </ul>
+
+  <div class="sidebar-footer" id="sidebar-footer">—</div>
+</aside>
+
+<!-- ═══════════ MAIN ═══════════ -->
+<main class="main">
+  <div class="header" id="header">
+    <h2 id="header-title">sextant</h2>
+    <span class="status" id="header-status"></span>
+  </div>
+
+  <div id="content">
+    <div class="empty">
+      <div class="icon">⚓</div>
+      <h3>选择一个 Agent 开始</h3>
+      <p>点击左侧 Agent 进入对话，或查看 Mailbox</p>
+    </div>
+  </div>
+</main>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// State
+// ══════════════════════════════════════════════════════════════
+let activeProject = null;
+let activeView = null;        // 'chat' | 'mailbox'
+let streamingAbort = null;
+
+// ══════════════════════════════════════════════════════════════
+// Init
+// ══════════════════════════════════════════════════════════════
+async function init() {
+  try {
+    const res = await fetch('/api/projects');
+    const projects = await res.json();
+    renderAgentList(projects);
+    document.getElementById('sidebar-footer').textContent =
+      `${projects.length} agent${projects.length>1?'s':''} ready`;
+  } catch (e) {
+    document.getElementById('agent-list').innerHTML =
+      '<li class="sidebar-item" style="color:var(--error)">连接失败</li>';
+  }
+}
+
+function renderAgentList(projects) {
+  const list = document.getElementById('agent-list');
+  list.innerHTML = projects.map(p => `
+    <li class="sidebar-item" data-view="chat" data-project="${p.id}" onclick="selectAgent('${p.id}')">
+      <span class="dot"></span>
+      ${p.id}
+      ${p.pending > 0 ? `<span class="badge">${p.pending}</span>` : ''}
+    </li>
+  `).join('');
+}
+
+// ══════════════════════════════════════════════════════════════
+// Agent selection
+// ══════════════════════════════════════════════════════════════
+async function selectAgent(projectId) {
+  // Abort any active stream
+  if (streamingAbort) { streamingAbort.abort(); streamingAbort = null; }
+
+  activeProject = projectId;
+  activeView = 'chat';
+
+  // Highlight sidebar
+  document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+  document.querySelector(`[data-project="${projectId}"]`)?.classList.add('active');
+
+  // Header
+  document.getElementById('header-title').textContent = projectId;
+  document.getElementById('header-status').textContent = '加载历史...';
+
+  // Build chat UI
+  const content = document.getElementById('content');
+  content.innerHTML = `
+    <div class="chat-area" id="messages"></div>
+    <div class="input-area" id="input-row">
+      <textarea id="prompt-input" rows="1"
+        placeholder="输入消息..."
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
+      <button id="send-btn" onclick="sendMessage()">发送</button>
+    </div>
+  `;
+
+  // Load history
+  try {
+    const res = await fetch(`/api/chat/${projectId}/history`);
+    const msgs = await res.json();
+    const container = document.getElementById('messages');
+    if (msgs.length === 0) {
+      container.innerHTML = '<div class="empty"><p>新对话 — 输入消息开始</p></div>';
+    } else {
+      msgs.forEach(m => appendMessage(m.role, m.content));
+    }
+    document.getElementById('header-status').textContent =
+      `${msgs.length} 条历史消息`;
+  } catch (e) {
+    document.getElementById('header-status').textContent = '加载失败';
+  }
+
+  scrollToBottom();
+}
+
+// ══════════════════════════════════════════════════════════════
+// Send message
+// ══════════════════════════════════════════════════════════════
+async function sendMessage() {
+  if (!activeProject) return;
+
+  const input = document.getElementById('prompt-input');
+  const btn = document.getElementById('send-btn');
+  const prompt = input.value.trim();
+  if (!prompt) return;
+
+  // Clear input
+  input.value = '';
+  input.style.height = 'auto';
+  btn.disabled = true;
+
+  // Append user message
+  appendMessage('user', prompt);
+  scrollToBottom();
+
+  // Start SSE
+  streamingAbort = new AbortController();
+  document.getElementById('header-status').innerHTML =
+    '<span class="streaming-indicator"></span>处理中...';
+
+  try {
+    // POST prompt
+    await fetch(`/api/chat/${activeProject}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({prompt}),
+    });
+
+    // SSE stream
+    const res = await fetch(`/api/chat/${activeProject}/stream`, {
+      signal: streamingAbort.signal,
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let agentMsg = null;
+    let cost = null;
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const data = JSON.parse(line.slice(6));
+
+          switch (data.type) {
+            case 'text':
+              if (!agentMsg) {
+                agentMsg = appendMessage('agent', '');
+              }
+              agentMsg.querySelector('.msg-content').textContent += data.content;
+              break;
+
+            case 'thinking':
+              appendMessage('thinking', data.content);
+              break;
+
+            case 'tool_use':
+              appendMessage('tool', null, {
+                name: data.name,
+                input: data.input,
+              });
+              break;
+
+            case 'tool_result':
+              appendMessage('tool-result', data.content, {
+                is_error: data.is_error,
+              });
+              break;
+
+            case 'server_tool':
+              appendMessage('tool', `🔧 ${data.name}`, {
+                name: data.name,
+                input: data.input,
+              });
+              break;
+
+            case 'server_tool_result':
+              appendMessage('tool-result', JSON.stringify(data.content).slice(0, 500));
+              break;
+
+            case 'done':
+              cost = data.cost;
+              document.getElementById('header-status').textContent =
+                cost != null
+                  ? `完成 · $${cost.toFixed(4)} · ${data.elapsed}s`
+                  : `完成 · ${data.elapsed}s`;
+              if (cost != null) {
+                appendCost(cost, data.elapsed);
+              }
+              break;
+
+            case 'error':
+              appendMessage('agent', `❌ ${data.message}`);
+              document.getElementById('header-status').textContent = '错误';
+              break;
+          }
+        } catch (_) {}
+      }
+      scrollToBottom();
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      appendMessage('agent', `❌ 连接错误: ${e.message}`);
+      document.getElementById('header-status').textContent = '连接错误';
+    }
+  } finally {
+    btn.disabled = false;
+    streamingAbort = null;
+    document.getElementById('prompt-input')?.focus();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Append message to chat
+// ══════════════════════════════════════════════════════════════
+function appendMessage(type, content, extra) {
+  const container = document.getElementById('messages');
+  if (!container) return null;
+
+  // Remove empty state
+  const empty = container.querySelector('.empty');
+  if (empty) empty.remove();
+
+  const div = document.createElement('div');
+  div.className = `msg ${type}`;
+
+  switch (type) {
+    case 'user':
+      div.innerHTML = `<div class="role-label">YOU</div><div class="msg-content">${esc(content)}</div>`;
+      break;
+    case 'agent':
+      div.innerHTML = `<div class="role-label">${activeProject||'agent'}</div><div class="msg-content">${esc(content)}</div>`;
+      break;
+    case 'thinking':
+      div.innerHTML = `💭 ${esc(content)}`;
+      break;
+    case 'tool':
+      const cmdLine = extra?.name === 'Bash' && extra?.input?.command
+        ? extra.input.command
+        : extra?.name === 'send_message'
+        ? `📬 → ${extra?.input?.to}: ${extra?.input?.subject}`
+        : null;
+      div.innerHTML = `
+        <div class="tool-name">⚙ ${extra?.name || 'tool'}</div>
+        ${cmdLine ? `<div class="tool-detail">${esc(cmdLine)}</div>` : ''}
+      `;
+      break;
+    case 'tool-result':
+      div.classList.add(type);
+      if (extra?.is_error) div.classList.add('error');
+      div.innerHTML = `<span>${extra?.is_error ? '❌' : '✓'} ${esc(String(content).slice(0, 300))}</span>`;
+      break;
+  }
+
+  container.appendChild(div);
+  return div;
+}
+
+function appendCost(cost, elapsed) {
+  const container = document.getElementById('messages');
+  if (!container) return;
+  const div = document.createElement('div');
+  div.className = 'cost-bar';
+  div.textContent = `$${cost.toFixed(4)} · ${elapsed}s`;
+  container.appendChild(div);
+}
+
+// ══════════════════════════════════════════════════════════════
+// Mailbox view
+// ══════════════════════════════════════════════════════════════
+async function showMailbox() {
+  if (streamingAbort) { streamingAbort.abort(); streamingAbort = null; }
+
+  activeProject = null;
+  activeView = 'mailbox';
+
+  document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+  document.querySelector('[data-view="mailbox"]')?.classList.add('active');
+
+  document.getElementById('header-title').textContent = 'Mailbox';
+  document.getElementById('header-status').textContent = '加载中...';
+
+  const content = document.getElementById('content');
+  content.innerHTML = '<div class="mailbox-view" id="mailbox-list">加载中...</div>';
+
+  try {
+    const res = await fetch('/api/mailbox');
+    const entries = await res.json();
+    const list = document.getElementById('mailbox-list');
+
+    if (entries.length === 0) {
+      list.innerHTML = '<div class="empty"><div class="icon">📭</div><h3>暂无消息</h3></div>';
+    } else {
+      list.innerHTML = entries.map(e => `
+        <div class="mailbox-card">
+          <div class="mb-header">
+            <span class="mb-from-to">${esc(e.from)} <span class="mb-arrow">→</span> ${esc(e.to)}</span>
+            <span class="mb-time">${fmtTime(e.timestamp)}</span>
+          </div>
+          <div class="mb-subject">${esc(e.subject)}</div>
+          <div class="mb-body">${esc(e.body)}</div>
+          <div style="margin-top:8px">
+            <span class="mb-status ${e.status||'pending'}">${e.status||'pending'}</span>
+            ${e.reply ? `<div style="margin-top:8px;font-size:13px;color:var(--text-dim)">↩ ${esc(e.reply).slice(0, 200)}</div>` : ''}
+          </div>
+        </div>
+      `).join('');
+    }
+    document.getElementById('header-status').textContent = `${entries.length} 条消息`;
+  } catch (e) {
+    document.getElementById('mailbox-list').innerHTML = `<div class="empty"><p>加载失败: ${e.message}</p></div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Helpers
+// ══════════════════════════════════════════════════════════════
+function esc(s) {
+  if (!s) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>');
+}
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  return ts.replace('T', ' ').split('+')[0].split('.')[0];
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    const area = document.getElementById('messages');
+    if (area) area.scrollTop = area.scrollHeight;
+  });
+}
+
+// Auto-resize textarea
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'prompt-input') {
+    e.target.style.height = 'auto';
+    e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// Periodic refresh of agent list (pending counts)
+// ══════════════════════════════════════════════════════════════
+setInterval(async () => {
+  try {
+    const res = await fetch('/api/projects');
+    const projects = await res.json();
+    renderAgentList(projects);
+    // Keep active highlight
+    if (activeProject) {
+      document.querySelector(`[data-project="${activeProject}"]`)?.classList.add('active');
+    }
+    if (activeView === 'mailbox') {
+      document.querySelector('[data-view="mailbox"]')?.classList.add('active');
+    }
+  } catch (_) {}
+}, 5000);
+
+// Start
+init();
+</script>
+</body>
+</html>
