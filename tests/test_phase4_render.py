@@ -52,7 +52,7 @@ def test_thinking_block():
     assert "proto" in plain
     assert "\033[2m" in out, f"DIM code missing: {out!r}"
     assert "\033[37m" in out, f"GREY code missing: {out!r}"
-    return "✅ ThinkingBlock"
+    # ✅ ThinkingBlock
 
 
 def test_thinking_multiline():
@@ -71,7 +71,7 @@ def test_thinking_multiline():
     )
     plain = _strip_ansi(out)
     assert plain.count("💭") == 3, f"Expected 3 💭, got {plain.count('💭')}: {plain!r}"
-    return "✅ ThinkingBlock 多行"
+    # ✅ ThinkingBlock 多行
 
 
 def test_empty_thinking():
@@ -85,7 +85,7 @@ def test_empty_thinking():
     )
     plain = _strip_ansi(out)
     assert "💭" not in plain, f"Expected no 💭: {plain!r}"
-    return "✅ 空 ThinkingBlock"
+    # ✅ 空 ThinkingBlock
 
 
 def test_tool_use_and_result():
@@ -126,7 +126,7 @@ def test_tool_use_and_result():
     assert (
         "1.2s" in plain_res or "1.3s" in plain_res
     ), f"Expected ~1.2s: {plain_res!r}"
-    return "✅ ToolUse + ToolResult 耗时"
+    # ✅ ToolUse + ToolResult 耗时
 
 
 def test_tool_error():
@@ -145,7 +145,7 @@ def test_tool_error():
     plain = _strip_ansi(out)
     assert "❌" in plain, f"Expected ❌: {plain!r}"
     assert "0.5s" in plain or "0.6s" in plain, f"Expected ~0.5s: {plain!r}"
-    return "✅ Tool 错误"
+    # ✅ Tool 错误
 
 
 def test_server_tool_use():
@@ -167,7 +167,7 @@ def test_server_tool_use():
     plain = _strip_ansi(out)
     assert "🔧" in plain, f"Expected 🔧: {plain!r}"
     assert "Python asyncio" in plain, f"Expected 'Python asyncio': {plain!r}"
-    return "✅ ServerToolUseBlock"
+    # ✅ ServerToolUseBlock
 
 
 def test_server_tool_result():
@@ -189,7 +189,7 @@ def test_server_tool_result():
     )
     plain = _strip_ansi(out)
     assert "✓" in plain, f"Expected ✓: {plain!r}"
-    return "✅ ServerToolResultBlock"
+    # ✅ ServerToolResultBlock
 
 
 def test_result_message():
@@ -213,7 +213,7 @@ def test_result_message():
     plain = _strip_ansi(out)
     assert "$0.0456" in plain, f"Expected cost: {plain!r}"
     assert "end_turn" in plain, f"Expected stop_reason: {plain!r}"
-    return "✅ ResultMessage"
+    # ✅ ResultMessage
 
 
 def test_orphaned_timer_warning():
@@ -234,7 +234,7 @@ def test_orphaned_timer_warning():
         ),
     )
     assert _tool_start_times == {}, f"Expected cleared: {_tool_start_times}"
-    return "✅ 孤立 timer 清理"
+    # ✅ 孤立 timer 清理
 
 
 def test_full_stream():
@@ -302,7 +302,7 @@ def test_full_stream():
     assert "✓" in plain, "Missing tool result"
     assert "🔧" in plain, "Missing server tool"
     assert "$0.0123" in plain, "Missing cost"
-    return "✅ 完整流模拟"
+    # ✅ 完整流模拟
 
 
 # ------------------------------------------------------------------
