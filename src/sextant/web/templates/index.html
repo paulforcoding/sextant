@@ -453,6 +453,7 @@
 let activeProject = null;
 let activeView = null;        // 'chat' | 'mailbox'
 let streamingAbort = null;
+const chatCache = {};         // projectId → messages.innerHTML (preserved across switches)
 
 // ══════════════════════════════════════════════════════════════
 // Init
@@ -488,6 +489,14 @@ async function selectAgent(projectId) {
   // Abort any active stream
   if (streamingAbort) { streamingAbort.abort(); streamingAbort = null; }
 
+  // Save current chat HTML to cache before switching away
+  if (activeProject && activeView === 'chat') {
+    const msgs = document.getElementById('messages');
+    if (msgs && msgs.children.length > 0) {
+      chatCache[activeProject] = msgs.innerHTML;
+    }
+  }
+
   activeProject = projectId;
   activeView = 'chat';
 
@@ -497,7 +506,7 @@ async function selectAgent(projectId) {
 
   // Header
   document.getElementById('header-title').textContent = projectId;
-  document.getElementById('header-status').textContent = '加载历史...';
+  document.getElementById('header-status').textContent = '';
 
   // Build chat UI
   const content = document.getElementById('content');
@@ -511,11 +520,23 @@ async function selectAgent(projectId) {
     </div>
   `;
 
-  // Load history
+  const container = document.getElementById('messages');
+
+  // Restore from cache if we've visited this agent before
+  if (chatCache[projectId]) {
+    container.innerHTML = chatCache[projectId];
+    document.getElementById('header-status').textContent = '已恢复';
+    scrollToBottom();
+    // Silently refresh history to catch CLI-originated messages
+    refreshHistory(projectId);
+    return;
+  }
+
+  // First visit: load history from disk
+  document.getElementById('header-status').textContent = '加载历史...';
   try {
     const res = await fetch(`/api/chat/${projectId}/history`);
     const msgs = await res.json();
-    const container = document.getElementById('messages');
     if (msgs.length === 0) {
       container.innerHTML = '<div class="empty"><p>新对话 — 输入消息开始</p></div>';
     } else {
@@ -528,6 +549,32 @@ async function selectAgent(projectId) {
   }
 
   scrollToBottom();
+}
+
+// ══════════════════════════════════════════════════════════════
+// Background history refresh (catches CLI-originated messages)
+// ══════════════════════════════════════════════════════════════
+async function refreshHistory(projectId) {
+  try {
+    const res = await fetch(`/api/chat/${projectId}/history`);
+    const msgs = await res.json();
+    if (!Array.isArray(msgs) || msgs.length === 0) return;
+
+    // Rebuild cache HTML from history data
+    // Use a temporary container so we don't disrupt the visible DOM
+    const tmp = document.createElement('div');
+    msgs.forEach(m => {
+      const div = document.createElement('div');
+      div.className = `msg ${m.role}`;
+      div.innerHTML = m.role === 'user'
+        ? `<div class="role-label">YOU</div><div class="msg-content">${esc(m.content)}</div>`
+        : `<div class="role-label">${esc(projectId)}</div><div class="msg-content">${esc(m.content)}</div>`;
+      tmp.appendChild(div);
+    });
+    chatCache[projectId] = tmp.innerHTML;
+  } catch (_) {
+    // Silently ignore — cache from web session is good enough
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
