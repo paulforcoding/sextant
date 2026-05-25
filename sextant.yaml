@@ -6,15 +6,11 @@
 # permission_mode: acceptEdits
 
 projects:
-  - id: test-project
-    directory: /tmp/sextant-demo
-    # Optional: restrict allowed tools during testing
+  - directory: /tmp/sextant-demo
+    # continue: true        # default — resume last CC session
+    # session_id: ""        # pin to a specific session ID
     # allowed_tools: [Read, Write, Edit, Bash]
-    # Optional: per-project permission override
     # permission_mode: default
-  - id: acp
-    directory: /tmp/acp
-  - id: ncp
-    directory: /tmp/ncp
-  - id: xcp
-    directory: /tmp/xcp
+  - directory: /tmp/acp
+  - directory: /tmp/ncp
+  - directory: /tmp/xcp

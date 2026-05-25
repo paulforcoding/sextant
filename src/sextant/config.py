@@ -10,11 +10,19 @@ import yaml
 
 @dataclass
 class ProjectConfig:
-    """A single project configuration."""
-    id: str
+    """A single project configuration.
+
+    ``id`` is derived from the last component of ``directory``.
+    """
     directory: Path
     allowed_tools: Optional[list[str]] = None
     permission_mode: Optional[str] = None  # acceptEdits, default, plan, etc.
+    continue_conversation: bool = True     # resume the most recent CC session
+    session_id: Optional[str] = None       # pin to a specific CC session ID
+
+    @property
+    def id(self) -> str:
+        return self.directory.name
 
 
 @dataclass
@@ -59,16 +67,19 @@ def load_config(path: str | Path = "sextant.yaml") -> SextantConfig:
 
 
 def _parse_raw(raw: dict) -> SextantConfig:
-    """Parse raw YAML dict into SextantConfig, deriving project_id from directory if needed."""
+    """Parse raw YAML dict into SextantConfig.
+
+    Project ``id`` is derived from the last component of ``directory``.
+    """
     projects = []
     for entry in raw.get("projects", []):
         dir_path = Path(entry["directory"]).expanduser().resolve()
-        project_id = entry.get("id") or dir_path.name
         projects.append(ProjectConfig(
-            id=project_id,
             directory=dir_path,
             allowed_tools=entry.get("allowed_tools"),
             permission_mode=entry.get("permission_mode"),
+            continue_conversation=entry.get("continue", True),
+            session_id=entry.get("session_id"),
         ))
     return SextantConfig(
         projects=projects,

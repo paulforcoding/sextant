@@ -186,7 +186,6 @@ async def _cmd_chat(args) -> None:
         if path.is_dir():
             project_id = path.name
             config.projects.append(ProjectConfig(
-                id=project_id,
                 directory=path,
             ))
             print(f"使用目录作为项目: {project_id}")
@@ -194,7 +193,13 @@ async def _cmd_chat(args) -> None:
             print(f"错误: 项目 '{args.project}' 不存在，且路径 '{path}' 不是目录。")
             sys.exit(1)
 
-    await chat(config, project_id, resume=resume_id)
+    # --resume overrides the target project's session settings
+    if resume_id:
+        proj = config.get_project(project_id)
+        proj.session_id = resume_id
+        proj.continue_conversation = True
+
+    await chat(config, project_id)
 
 
 def _workspace_slug(project_dir: str | Path) -> str:

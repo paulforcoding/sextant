@@ -38,12 +38,15 @@ if TYPE_CHECKING:
     from .config import ProjectConfig, SextantConfig
 
 
-async def chat(config: "SextantConfig", project_id: str, *, resume: str | None = None) -> None:
+async def chat(config: "SextantConfig", project_id: str) -> None:
     """Start an interactive REPL session.
 
     All agents start when SessionManager enters context.  The user interacts
     with one project at a time.  /chat <project> switches the active project
     and shows pending mailbox messages as drafts.
+
+    Session continuation is controlled per-project via sextant.yaml:
+    ``continue`` (bool) and ``session_id`` (str).
     """
     import time as _time
 
@@ -75,7 +78,7 @@ async def chat(config: "SextantConfig", project_id: str, *, resume: str | None =
     loop.add_signal_handler(signal.SIGINT, _on_sigint)
 
     try:
-        async with SessionManager(config, resume=resume) as mgr:
+        async with SessionManager(config) as mgr:
             mgr_ref[0] = mgr
             set_manager(mgr)
             mgr.set_current_project(project.id)

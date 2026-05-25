@@ -67,9 +67,8 @@ class SessionManager:
     an in-process MCP server with the ``send_message`` tool.
     """
 
-    def __init__(self, config: SextantConfig, *, resume: str | None = None):
+    def __init__(self, config: SextantConfig):
         self._config = config
-        self._resume = resume
         # project_id → ClaudeSDKClient
         self._clients: dict[str, ClaudeSDKClient] = {}
         # Currently active project (the one the user is chatting with).
@@ -147,8 +146,8 @@ class SessionManager:
                 cwd=str(project.directory),
                 permission_mode=project.permission_mode or self._config.permission_mode or "default",
                 setting_sources=["project"],
-                continue_conversation=True,
-                resume=self._resume,
+                continue_conversation=project.continue_conversation,
+                resume=project.session_id,
                 env=_load_claude_env(),
                 mcp_servers={"sextant": mcp_server},
                 can_use_tool=can_use_tool,

@@ -253,9 +253,10 @@ async def _agent_query(project_id: str, prompt: str, q: queue.Queue):
 
         opts = ClaudeAgentOptions(
             cwd=cwd,
-            permission_mode="acceptEdits",
+            permission_mode=proj.permission_mode or _config.permission_mode or "acceptEdits",
             setting_sources=["project"],
-            continue_conversation=True,
+            continue_conversation=proj.continue_conversation,
+            resume=proj.session_id,
             env=env,
             mcp_servers={"sextant": _get_mcp_server()},
             system_prompt={
