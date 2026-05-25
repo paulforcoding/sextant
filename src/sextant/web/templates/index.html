@@ -512,12 +512,11 @@ async function selectAgent(projectId) {
   const content = document.getElementById('content');
   content.innerHTML = `
     <div class="chat-area" id="messages"></div>
-    <div class="input-area" id="input-row">
+    <form class="input-area" id="input-row" onsubmit="event.preventDefault(); sendMessage(); return false;">
       <textarea id="prompt-input" rows="1"
-        placeholder="输入消息..."
-        onkeydown="if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();sendMessage()}"></textarea>
-      <button id="send-btn" onclick="sendMessage()">发送</button>
-    </div>
+        placeholder="输入消息..."></textarea>
+      <button id="send-btn" type="submit">发送</button>
+    </form>
   `;
 
   const container = document.getElementById('messages');
