@@ -29,6 +29,7 @@ from claude_agent_sdk import (
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+    rename_session,
 )
 
 from .session import SessionManager
@@ -474,6 +475,7 @@ async def _handle_command(
         print("  /chat <项目>   — 切换到指定项目（显示待处理消息）")
         print("  /context [all] — 上下文窗口用量")
         print("  /usage         — 费用/用量统计")
+        print("  /rename [标题] — 重命名当前会话")
         print("  /info          — 显示当前 session 信息")
         print("  /perm <模式>   — 切换权限模式 (default|acceptEdits|plan)")
         print("  /model <名称>  — 切换模型")
@@ -500,6 +502,28 @@ async def _handle_command(
                   f"{usage['totalTokens']:,d} / {usage['maxTokens']:,d} tokens")
         except Exception:
             pass
+    elif command == "/rename":
+        sid = mgr._session_ids.get(cur_project)
+        if not sid:
+            print("错误：未捕获到 session_id。请先发起一次对话。")
+            return None
+        if len(parts) > 1:
+            title = " ".join(parts[1:])
+        else:
+            print("新标题: ", end="", flush=True)
+            loop = asyncio.get_running_loop()
+            try:
+                title = (await loop.run_in_executor(None, input)).strip()
+            except EOFError:
+                return None
+        if not title:
+            return None
+        try:
+            proj = config.get_project(cur_project)
+            rename_session(sid, title, directory=str(proj.directory))
+            print(f"会话重命名 → {title}")
+        except Exception as e:
+            print(f"重命名失败: {e}")
     elif command == "/chat":
         if len(parts) < 2:
             print("用法: /chat <项目ID>")
