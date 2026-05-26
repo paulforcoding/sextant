@@ -388,6 +388,71 @@ def _tool_description(name: str, inp: dict) -> str:
 
 
 # ------------------------------------------------------------------
+# Phase 9: /context helper
+# ------------------------------------------------------------------
+
+def _progress_bar(pct: float, width: int = 20) -> str:
+    """Draw a Unicode progress bar for context usage."""
+    filled = int(round(pct / 100 * width))
+    empty = width - filled
+    bar = "█" * filled + "░" * empty
+    if pct > 90:
+        return f"\033[31m{bar}\033[0m"   # red
+    if pct > 70:
+        return f"\033[33m{bar}\033[0m"   # yellow
+    return f"\033[32m{bar}\033[0m"        # green
+
+
+async def _handle_context(mgr: SessionManager, cur_project: str, show_all: bool = False) -> None:
+    """Render context window usage from get_context_usage()."""
+    try:
+        client = mgr.get_client(cur_project)
+        usage = await client.get_context_usage()
+    except Exception as e:
+        print(f"(无法获取 context 数据: {e})")
+        return
+
+    pct = usage.get("percentage", 0)
+    bar = _progress_bar(pct)
+    print(f"\n  {bar} {pct:.0f}%  {usage['totalTokens']:,d} / {usage['maxTokens']:,d} tokens")
+    print(f"  模型: {usage.get('model', '?')}  "
+          f"原始窗口: {usage.get('rawMaxTokens', '?'):,d}  "
+          f"自动压缩: {'✓' if usage.get('isAutoCompactEnabled') else '✗'}")
+
+    # Category breakdown
+    cats = sorted(usage.get("categories", []), key=lambda c: -c["tokens"])
+    if cats:
+        print()
+        for cat in cats:
+            if cat["tokens"] > 0:
+                pct_cat = cat["tokens"] / max(usage["totalTokens"], 1) * 100
+                print(f"  {cat['name']:<22s} {cat['tokens']:>10,d}  ({pct_cat:5.1f}%)")
+
+    if show_all:
+        # Memory files
+        mem = usage.get("memoryFiles", [])
+        if mem:
+            print(f"\n  ── 记忆文件 ({len(mem)}) ──")
+            for f in mem:
+                print(f"  {f.get('path', '?'):<40s} {f.get('tokens', 0):>6,d} tokens  [{f.get('type', '?')}]")
+
+        # MCP tools
+        mcp = usage.get("mcpTools", [])
+        if mcp:
+            print(f"\n  ── MCP 工具 ({len(mcp)}) ──")
+            for t in mcp:
+                loaded = "✓" if t.get("isLoaded") else "✗"
+                print(f"  {t.get('serverName', '?')}:{t.get('name', '?')}  {t.get('tokens', 0):>6,d} tokens  [{loaded}]")
+
+        # Agents
+        agents = usage.get("agents", [])
+        if agents:
+            print(f"\n  ── Agent 定义 ({len(agents)}) ──")
+            for a in agents:
+                print(f"  {a.get('agentType', '?'):<25s} {a.get('tokens', 0):>6,d} tokens  [{a.get('source', '?')}]")
+
+
+# ------------------------------------------------------------------
 # Command handler
 # ------------------------------------------------------------------
 
@@ -406,12 +471,16 @@ async def _handle_command(
         print("命令:")
         print("  /help          — 显示帮助")
         print("  /chat <项目>   — 切换到指定项目（显示待处理消息）")
+        print("  /context [all] — 上下文窗口用量")
         print("  /info          — 显示当前 session 信息")
         print("  /perm <模式>   — 切换权限模式 (default|acceptEdits|plan)")
         print("  /model <名称>  — 切换模型")
         print("  /status        — 显示各项目 mailbox 状态")
         print("  /exit          — 退出")
         print("  /clear         — 清屏")
+    elif command == "/context":
+        show_all = len(parts) > 1 and parts[1] == "all"
+        await _handle_context(mgr, cur_project, show_all=show_all)
     elif command == "/chat":
         if len(parts) < 2:
             print("用法: /chat <项目ID>")
