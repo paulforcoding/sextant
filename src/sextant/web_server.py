@@ -206,6 +206,112 @@ def api_agents():
     })
 
 
+@app.route("/api/chat/<project_id>/mcp")
+def api_mcp(project_id: str):
+    """List MCP servers and tools for a project."""
+    if project_id not in _project_ids:
+        return jsonify({"error": f"未知项目: {project_id}"}), 404
+
+    servers = []
+
+    # 1. sextant built-in MCP server (always present)
+    sextant_tools = [{
+        "name": "send_message",
+        "description": (
+            "向其他项目发送消息。消息会投递到对方的收件箱，"
+            "对方下次查看时会收到。"
+        ),
+        "parameters": ["to (目标项目ID)", "subject", "body"],
+    }]
+    servers.append({
+        "name": "sextant",
+        "source": "built-in",
+        "status": "connected" if _ready.is_set() else "starting",
+        "tools": sextant_tools,
+        "tool_count": len(sextant_tools),
+    })
+
+    # 2. Project-level MCP servers from .mcp.json
+    try:
+        proj = _config.get_project(project_id)
+        proj_dir = Path(proj.directory).expanduser().resolve()
+        mcp_json = proj_dir / ".mcp.json"
+        if mcp_json.is_file():
+            with open(mcp_json) as f:
+                mcp_config = json.load(f)
+            mcp_servers = mcp_config.get("mcpServers", {})
+            for name, cfg in mcp_servers.items():
+                tools_info = _describe_mcp_server_tools(name, cfg)
+                servers.append({
+                    "name": name,
+                    "source": "project (.mcp.json)",
+                    "status": "configured",
+                    "command": cfg.get("command", ""),
+                    "args": cfg.get("args", []),
+                    "tools": tools_info,
+                    "tool_count": len(tools_info),
+                })
+    except Exception:
+        pass
+
+    # 3. Global MCP servers from ~/.claude/settings.json
+    try:
+        settings_path = Path.home() / ".claude" / "settings.json"
+        if settings_path.is_file():
+            with open(settings_path) as f:
+                settings = json.load(f)
+            global_mcp = settings.get("mcpServers", {})
+            for name, cfg in global_mcp.items():
+                # Skip if already seen from project config
+                if any(s["name"] == name for s in servers):
+                    continue
+                tools_info = _describe_mcp_server_tools(name, cfg)
+                servers.append({
+                    "name": name,
+                    "source": "global (~/.claude/settings.json)",
+                    "status": "configured",
+                    "command": cfg.get("command", ""),
+                    "args": cfg.get("args", []),
+                    "tools": tools_info,
+                    "tool_count": len(tools_info),
+                })
+    except Exception:
+        pass
+
+    return jsonify({
+        "project": project_id,
+        "servers": servers,
+        "total_servers": len(servers),
+        "total_tools": sum(s["tool_count"] for s in servers),
+    })
+
+
+def _describe_mcp_server_tools(server_name: str, config: dict) -> list[dict]:
+    """Extract tool descriptions from an MCP server config."""
+    tools = []
+    # Try tools whitelist if present
+    tool_names = config.get("tools", [])
+    if tool_names:
+        for t in tool_names:
+            tools.append({"name": t, "description": "", "from_whitelist": True})
+        return tools
+
+    # Try tools in env vars
+    env = config.get("env", {})
+    tool_list_env = env.get("MCP_TOOLS", "")
+    if tool_list_env:
+        for t in tool_list_env.split(","):
+            t = t.strip()
+            if t:
+                tools.append({"name": t, "description": ""})
+        return tools
+
+    # If no explicit tool list, return a placeholder
+    if tools:
+        return tools
+    return [{"name": "(tools discovered at runtime)", "description": ""}]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Mailbox
 # ═══════════════════════════════════════════════════════════════════════════

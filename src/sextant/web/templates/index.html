@@ -874,7 +874,70 @@ async function handleAgents() {
 }
 
 async function handleMcp() {
-  appendSystem('暂未实现 — 下一个命令。');
+  if (!activeProject) {
+    appendSystem('请先选择一个 Agent。');
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/chat/${activeProject}/mcp`);
+    if (!res.ok) {
+      appendSystem(`❌ ${res.status}: ${(await res.json()).error || '未知错误'}`);
+      return;
+    }
+    const data = await res.json();
+    const servers = data.servers || [];
+
+    if (servers.length === 0) {
+      appendSystem('没有配置任何 MCP 服务器。');
+      return;
+    }
+
+    let html = '';
+    for (const srv of servers) {
+      const statusIcon = srv.status === 'connected'
+        ? '<span style="color:var(--success)">●</span>'
+        : srv.status === 'starting'
+        ? '<span style="color:#facc15">○</span>'
+        : '<span style="color:var(--text-dim)">○</span>';
+
+      html += `<div style="margin-bottom:16px;padding:12px;background:var(--card);border-radius:var(--radius-sm);border:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          ${statusIcon}
+          <span style="font-weight:600;color:#fff;font-size:14px">${esc(srv.name)}</span>
+          <span style="font-size:11px;color:var(--text-dim);margin-left:auto">${esc(srv.source)}</span>
+        </div>`;
+
+      if (srv.command) {
+        html += `<div style="font-family:monospace;font-size:12px;color:var(--text-dim);margin-bottom:6px">
+          $ ${esc(srv.command)} ${(srv.args || []).map(esc).join(' ')}
+        </div>`;
+      }
+
+      const tools = srv.tools || [];
+      html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">${tools.length} tool(s):</div>`;
+      for (const t of tools) {
+        html += `<div style="font-size:13px;padding:4px 8px;margin:2px 0;background:var(--tool-bg);border-radius:4px">
+          <code style="color:var(--accent)">${esc(t.name)}</code>`;
+        if (t.description) {
+          html += ` <span style="color:var(--text-dim)">— ${esc(t.description)}</span>`;
+        }
+        if (t.parameters && t.parameters.length > 0) {
+          html += ` <span style="color:var(--thinking);font-size:11px">(${esc(t.parameters.join(', '))})</span>`;
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+
+    html += `<div style="font-size:12px;color:var(--text-dim);margin-top:4px">
+      共 ${data.total_servers} 个服务器，${data.total_tools} 个工具
+    </div>`;
+
+    appendSystem(html, true);
+  } catch (e) {
+    appendSystem(`❌ 获取 MCP 信息失败: ${e.message}`);
+  }
 }
 
 function appendSystem(content, isHtml = false) {
