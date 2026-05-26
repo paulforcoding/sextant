@@ -80,6 +80,7 @@ class SessionManager:
         # Phase 9: per-project session metadata captured from ResultMessage.
         self._session_ids: dict[str, str] = {}
         self._total_costs: dict[str, float] = {}
+        self._last_costs: dict[str, float] = {}
 
     # -- public ----------------------------------------------------
 

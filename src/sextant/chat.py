@@ -280,6 +280,7 @@ def _display_message(msg, mgr=None, cur_project=None) -> None:
                 mgr._total_costs[cur_project] = (
                     mgr._total_costs.get(cur_project, 0.0) + msg.total_cost_usd
                 )
+                mgr._last_costs[cur_project] = msg.total_cost_usd
 
 
 # ------------------------------------------------------------------
@@ -472,6 +473,7 @@ async def _handle_command(
         print("  /help          — 显示帮助")
         print("  /chat <项目>   — 切换到指定项目（显示待处理消息）")
         print("  /context [all] — 上下文窗口用量")
+        print("  /usage         — 费用/用量统计")
         print("  /info          — 显示当前 session 信息")
         print("  /perm <模式>   — 切换权限模式 (default|acceptEdits|plan)")
         print("  /model <名称>  — 切换模型")
@@ -481,6 +483,23 @@ async def _handle_command(
     elif command == "/context":
         show_all = len(parts) > 1 and parts[1] == "all"
         await _handle_context(mgr, cur_project, show_all=show_all)
+    elif command in ("/usage", "/cost"):
+        total = mgr._total_costs.get(cur_project, 0.0)
+        last = mgr._last_costs.get(cur_project)
+        print(f"\n  项目: {cur_project}")
+        print(f"  累计费用: ${total:.4f}")
+        if last is not None:
+            print(f"  最近调用: ${last:.4f}")
+        if not total and last is None:
+            print("  (尚无费用数据，请先发起对话)")
+        # Also show context snapshot
+        try:
+            usage = await mgr.get_client(cur_project).get_context_usage()
+            bar = _progress_bar(usage.get("percentage", 0))
+            print(f"  上下文: {bar} {usage['percentage']:.0f}%  "
+                  f"{usage['totalTokens']:,d} / {usage['maxTokens']:,d} tokens")
+        except Exception:
+            pass
     elif command == "/chat":
         if len(parts) < 2:
             print("用法: /chat <项目ID>")
