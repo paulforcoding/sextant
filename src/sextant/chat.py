@@ -477,6 +477,7 @@ async def _handle_command(
         print("  /usage         — 费用/用量统计")
         print("  /rename [标题] — 重命名当前会话")
         print("  /compact [焦点] — 压缩对话历史以释放上下文")
+        print("  /plan          — 进入 Plan 模式（只读分析）")
         print("  /info          — 显示当前 session 信息")
         print("  /perm <模式>   — 切换权限模式 (default|acceptEdits|plan)")
         print("  /model <名称>  — 切换模型")
@@ -538,6 +539,11 @@ async def _handle_command(
         except Exception as e:
             print(f"\n[错误] {e}", file=sys.stderr)
         print("✓ 压缩完成。用 /context 查看新占比。")
+    elif command in ("/plan",):
+        client = mgr.get_client(cur_project)
+        await client.set_permission_mode("plan")
+        print("进入 Plan 模式 — Agent 只读分析，不修改文件。")
+        print("用 /perm default 或 /perm acceptEdits 退出。")
     elif command == "/chat":
         if len(parts) < 2:
             print("用法: /chat <项目ID>")
