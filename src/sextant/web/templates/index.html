@@ -46,6 +46,7 @@
     display: flex;
     flex-direction: column;
     padding: 20px 0;
+    position: relative;
   }
 
   .sidebar-header {
@@ -129,6 +130,127 @@
     border-top: 1px solid var(--border);
     font-size: 12px;
     color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .sidebar-footer .status-text {
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* ── Settings button ── */
+  .settings-btn {
+    width: 32px; height: 32px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--card);
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition);
+    flex-shrink: 0;
+  }
+
+  .settings-btn:hover {
+    background: var(--card-hover);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  /* ── Settings popup ── */
+  .settings-popup {
+    position: absolute;
+    bottom: 52px;
+    left: 20px;
+    right: 20px;
+    background: var(--card);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 16px;
+    z-index: 100;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    display: none;
+    animation: fadeIn 0.15s ease;
+  }
+
+  .settings-popup.visible { display: block; }
+
+  .settings-popup h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .settings-popup .close-btn {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: color var(--transition);
+  }
+
+  .settings-popup .close-btn:hover { color: #fff; }
+
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+  }
+
+  .setting-row .label {
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  /* ── Toggle switch ── */
+  .toggle-switch {
+    position: relative;
+    width: 40px; height: 22px;
+    flex-shrink: 0;
+  }
+
+  .toggle-switch input {
+    opacity: 0; width: 0; height: 0;
+  }
+
+  .toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--border);
+    border-radius: 22px;
+    transition: background var(--transition);
+  }
+
+  .toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 16px; height: 16px;
+    left: 3px; top: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform var(--transition);
+  }
+
+  .toggle-switch input:checked + .toggle-slider {
+    background: var(--accent);
+  }
+
+  .toggle-switch input:checked + .toggle-slider::before {
+    transform: translateX(18px);
   }
 
   /* ── Main ── */
@@ -427,7 +549,25 @@
     </li>
   </ul>
 
-  <div class="sidebar-footer" id="sidebar-footer">—</div>
+  <div class="sidebar-footer" id="sidebar-footer">
+    <span class="status-text">—</span>
+    <button class="settings-btn" onclick="toggleSettings()" title="设置">⚙</button>
+  </div>
+
+  <!-- Settings popup -->
+  <div class="settings-popup" id="settings-popup">
+    <h3>
+      设置
+      <button class="close-btn" onclick="toggleSettings()">✕</button>
+    </h3>
+    <div class="setting-row">
+      <span class="label">显示思考过程</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="toggle-thinking" onchange="updateThinkingSetting()" checked>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+  </div>
 </aside>
 
 <!-- ═══════════ MAIN ═══════════ -->
@@ -454,17 +594,29 @@ let activeProject = null;
 let activeView = null;        // 'chat' | 'mailbox'
 let streamingAbort = null;
 const chatCache = {};         // projectId → messages.innerHTML (preserved across switches)
+let showThinking = true;      // settings: show LLM thinking blocks
 
 // ══════════════════════════════════════════════════════════════
 // Init
 // ══════════════════════════════════════════════════════════════
 async function init() {
+  // Load saved settings
+  try {
+    const saved = localStorage.getItem('sextant_showThinking');
+    if (saved !== null) {
+      showThinking = saved === 'true';
+      document.getElementById('toggle-thinking').checked = showThinking;
+    }
+  } catch (_) {}
+
   try {
     const res = await fetch('/api/projects');
     const projects = await res.json();
     renderAgentList(projects);
-    document.getElementById('sidebar-footer').textContent =
-      `${projects.length} agent${projects.length>1?'s':''} ready`;
+    const footerText = document.querySelector('#sidebar-footer .status-text');
+    if (footerText) {
+      footerText.textContent = `${projects.length} agent${projects.length>1?'s':''} ready`;
+    }
   } catch (e) {
     document.getElementById('agent-list').innerHTML =
       '<li class="sidebar-item" style="color:var(--error)">连接失败</li>';
@@ -664,7 +816,9 @@ async function sendMessage() {
               break;
 
             case 'thinking':
-              appendMessage('thinking', data.content);
+              if (showThinking) {
+                appendMessage('thinking', data.content);
+              }
               break;
 
             case 'tool_use':
@@ -745,6 +899,7 @@ function appendMessage(type, content, extra) {
       div.innerHTML = `<div class="role-label">${activeProject||'agent'}</div><div class="msg-content">${esc(content)}</div>`;
       break;
     case 'thinking':
+      if (!showThinking) return null;
       div.innerHTML = `💭 ${esc(content)}`;
       break;
     case 'tool':
@@ -752,7 +907,7 @@ function appendMessage(type, content, extra) {
         ? extra.input.command
         : extra?.name === 'send_message'
         ? `📬 → ${extra?.input?.to}: ${extra?.input?.subject}`
-        : null;
+        : formatToolInput(extra?.input);
       div.innerHTML = `
         <div class="tool-name">⚙ ${extra?.name || 'tool'}</div>
         ${cmdLine ? `<div class="tool-detail">${esc(cmdLine)}</div>` : ''}
@@ -962,6 +1117,31 @@ function appendSystem(content, isHtml = false) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// Settings
+// ══════════════════════════════════════════════════════════════
+function toggleSettings() {
+  const popup = document.getElementById('settings-popup');
+  popup.classList.toggle('visible');
+}
+
+function updateThinkingSetting() {
+  showThinking = document.getElementById('toggle-thinking').checked;
+  try {
+    localStorage.setItem('sextant_showThinking', String(showThinking));
+  } catch (_) {}
+}
+
+// Close popup when clicking outside
+document.addEventListener('click', (e) => {
+  const popup = document.getElementById('settings-popup');
+  if (!popup || !popup.classList.contains('visible')) return;
+  const btn = document.querySelector('.settings-btn');
+  if (!popup.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+    popup.classList.remove('visible');
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
 // Helpers
 // ══════════════════════════════════════════════════════════════
 function esc(s) {
@@ -971,6 +1151,21 @@ function esc(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\n/g, '<br>');
+}
+
+function formatToolInput(input) {
+  if (!input || typeof input !== 'object') return '';
+  if (Object.keys(input).length === 0) return '';
+  // Single key with string value — show it directly
+  const keys = Object.keys(input);
+  if (keys.length === 1 && typeof input[keys[0]] === 'string') {
+    return `${keys[0]}: ${input[keys[0]]}`;
+  }
+  // Multiple keys or non-string values — compact JSON
+  try {
+    const s = JSON.stringify(input);
+    return s.length > 300 ? s.slice(0, 297) + '...' : s;
+  } catch (_) { return ''; }
 }
 
 function fmtTime(ts) {
@@ -990,6 +1185,14 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'prompt-input') {
     e.target.style.height = 'auto';
     e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+  }
+});
+
+// Enter to send (Shift+Enter for newline). e.isComposing guards against IME.
+document.addEventListener('keydown', (e) => {
+  if (e.target.id === 'prompt-input' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    sendMessage();
   }
 });
 
