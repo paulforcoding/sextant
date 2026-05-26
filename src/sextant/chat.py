@@ -29,6 +29,7 @@ from claude_agent_sdk import (
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+    fork_session,
     rename_session,
 )
 
@@ -478,6 +479,7 @@ async def _handle_command(
         print("  /rename [标题] — 重命名当前会话")
         print("  /compact [焦点] — 压缩对话历史以释放上下文")
         print("  /plan          — 进入 Plan 模式（只读分析）")
+        print("  /fork          — 分支当前会话到新会话")
         print("  /info          — 显示当前 session 信息")
         print("  /perm <模式>   — 切换权限模式 (default|acceptEdits|plan)")
         print("  /model <名称>  — 切换模型")
@@ -544,6 +546,20 @@ async def _handle_command(
         await client.set_permission_mode("plan")
         print("进入 Plan 模式 — Agent 只读分析，不修改文件。")
         print("用 /perm default 或 /perm acceptEdits 退出。")
+    elif command in ("/fork", "/branch"):
+        sid = mgr._session_ids.get(cur_project)
+        if not sid:
+            print("错误：未捕获到 session_id。请先发起一次对话。")
+            return None
+        proj = config.get_project(cur_project)
+        try:
+            result = fork_session(sid, directory=str(proj.directory))
+            print(f"会话已分支。")
+            print(f"  原会话: {sid}")
+            print(f"  新会话: {result.session_id}")
+            print(f"用 `sextant chat {cur_project} --resume {result.session_id}` 进入新会话。")
+        except Exception as e:
+            print(f"分支失败: {e}")
     elif command == "/chat":
         if len(parts) < 2:
             print("用法: /chat <项目ID>")
