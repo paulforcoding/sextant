@@ -383,7 +383,7 @@ async def _agent_query(project_id: str, prompt: str, q: queue.Queue):
 
         opts = ClaudeAgentOptions(
             cwd=cwd,
-            permission_mode=proj.permission_mode or _config.permission_mode or "acceptEdits",
+            permission_mode=proj.permission_mode or _config.permission_mode or "bypassPermissions",
             setting_sources=["project"],
             continue_conversation=proj.continue_conversation,
             resume=proj.session_id,
@@ -579,19 +579,19 @@ def create_app(config_path: str = "sextant.yaml") -> Flask:
 def _boot_agents() -> None:
     """Start all CC agents in a background event loop.
 
-    Forces acceptEdits mode — web UI has no terminal for canUseTool prompts.
+    Uses bypassPermissions mode — web UI has no terminal for canUseTool prompts.
     """
     global _mgr, _startup_error
 
     from .session import SessionManager
     from .send_message import set_manager
 
-    # Force acceptEdits: web workers have no terminal for input()
+    # bypassPermissions: web workers have no terminal for input()
     for proj in _config.projects:
         if not proj.permission_mode:
-            proj.permission_mode = "acceptEdits"
+            proj.permission_mode = "bypassPermissions"
     if not _config.permission_mode:
-        _config.permission_mode = "acceptEdits"
+        _config.permission_mode = "bypassPermissions"
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
