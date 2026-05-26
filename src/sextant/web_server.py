@@ -183,6 +183,30 @@ def api_history(project_id: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Slash commands
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/agents")
+def api_agents():
+    """List all configured agents with status info."""
+    result = []
+    for proj in _config.projects if _config else []:
+        info = {
+            "id": proj.id,
+            "directory": str(proj.directory),
+            "continue": proj.continue_conversation,
+            "session_id": proj.session_id,
+            "ready": _ready.is_set(),
+        }
+        result.append(info)
+    return jsonify({
+        "agents": result,
+        "current": None,  # web UI tracks this client-side
+        "total": len(result),
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Mailbox
 # ═══════════════════════════════════════════════════════════════════════════
 
