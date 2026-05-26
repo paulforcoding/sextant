@@ -130,7 +130,7 @@ async def chat(config: "SextantConfig", project_id: str) -> None:
                         if hasattr(msg, "model") and msg.model:
                             model = msg.model
 
-                        _display_message(msg)
+                        _display_message(msg, mgr, cur_project)
                     _render_status(cur_project, mgr, model, int(_time.time() - t_start))
                 except Exception as e:
                     print(f"\n[错误] {e}", file=sys.stderr)
@@ -234,8 +234,12 @@ async def _read_line(interrupted: asyncio.Event) -> str:
     return input_future.result()
 
 
-def _display_message(msg) -> None:
-    """Render a single response message to stdout."""
+def _display_message(msg, mgr=None, cur_project=None) -> None:
+    """Render a single response message to stdout.
+
+    When *mgr* and *cur_project* are provided, captures session_id and
+    accumulates cost from ResultMessage for /rename, /fork, /usage.
+    """
     if isinstance(msg, AssistantMessage):
         for block in msg.content:
             if isinstance(block, ThinkingBlock):
@@ -267,8 +271,15 @@ def _display_message(msg) -> None:
                 file=sys.stderr,
             )
             _tool_start_times.clear()
+        # Phase 9: capture session metadata
+        if msg.session_id and mgr is not None and cur_project:
+            mgr._session_ids[cur_project] = msg.session_id
         if msg.total_cost_usd is not None:
             print(f"  ── ${msg.total_cost_usd:.4f} · {msg.stop_reason or 'done'} ──")
+            if mgr is not None and cur_project:
+                mgr._total_costs[cur_project] = (
+                    mgr._total_costs.get(cur_project, 0.0) + msg.total_cost_usd
+                )
 
 
 # ------------------------------------------------------------------
@@ -417,7 +428,7 @@ async def _handle_command(
             print()  # newline after input
             try:
                 async for msg in mgr.query(target, prompt):
-                    _display_message(msg)
+                    _display_message(msg, mgr, target)
             except Exception as e:
                 print(f"\n[错误] {e}", file=sys.stderr)
         return target  # switched successfully

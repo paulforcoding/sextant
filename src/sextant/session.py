@@ -77,6 +77,9 @@ class SessionManager:
         self.cancel_event: asyncio.Event = asyncio.Event()
         # v2.0: Mailbox is the single source of truth for messages.
         self._mailbox = Mailbox()
+        # Phase 9: per-project session metadata captured from ResultMessage.
+        self._session_ids: dict[str, str] = {}
+        self._total_costs: dict[str, float] = {}
 
     # -- public ----------------------------------------------------
 
