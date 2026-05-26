@@ -33,10 +33,16 @@ app = Flask(__name__, template_folder=str(_HERE / "web" / "templates"))
 
 _mgr: Any = None           # SessionManager — None until agents are ready
 _streams: dict[str, "queue.Queue[dict]"] = {}
+_agent_loop: asyncio.AbstractEventLoop | None = None  # kept alive for cross-thread agent calls
 _config: Any = None
 _project_ids: list[str] = []
 _ready: threading.Event = threading.Event()  # set when all agents are up
 _startup_error: str | None = None
+
+# Per-project cost / session tracking (for /usage, /rename, /fork)
+_web_session_ids: dict[str, str] = {}    # project_id → session_id
+_web_total_costs: dict[str, float] = {}  # project_id → total USD
+_web_last_costs: dict[str, float] = {}   # project_id → last USD
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -286,6 +292,148 @@ def api_mcp(project_id: str):
     })
 
 
+# ── /context ──
+@app.route("/api/chat/<project_id>/context")
+def api_context(project_id: str):
+    """Get context window usage via get_context_usage()."""
+    if project_id not in _project_ids:
+        return jsonify({"error": f"未知项目: {project_id}"}), 404
+    try:
+        usage = _run_agent_async(project_id, "get_context_usage")
+        return jsonify(usage)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /usage /cost ──
+@app.route("/api/chat/<project_id>/usage")
+def api_usage(project_id: str):
+    """Get cost summary for a project."""
+    if project_id not in _project_ids:
+        return jsonify({"error": f"未知项目: {project_id}"}), 404
+    result = {
+        "project": project_id,
+        "total_cost": round(_web_total_costs.get(project_id, 0.0), 6),
+        "last_cost": round(_web_last_costs.get(project_id, 0.0), 6) if project_id in _web_last_costs else None,
+    }
+    # Also get context snapshot
+    try:
+        usage = _run_agent_async(project_id, "get_context_usage")
+        result["context_pct"] = usage.get("percentage", 0)
+        result["context_tokens"] = usage.get("totalTokens", 0)
+        result["context_max"] = usage.get("maxTokens", 0)
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+# ── /info ──
+@app.route("/api/chat/<project_id>/info")
+def api_info(project_id: str):
+    """Get agent server info."""
+    if project_id not in _project_ids:
+        return jsonify({"error": f"未知项目: {project_id}"}), 404
+    try:
+        info = _run_agent_async(project_id, "get_server_info")
+        proj = _config.get_project(project_id)
+        return jsonify({
+            "project": project_id,
+            "pid": info.get("pid", "?"),
+            "cwd": str(proj.directory),
+            "session_id": _web_session_ids.get(project_id),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /rename ──
+@app.route("/api/chat/<project_id>/rename", methods=["POST"])
+def api_rename(project_id: str):
+    """Rename the current session."""
+    if project_id not in _project_ids:
+        return jsonify({"error": f"未知项目: {project_id}"}), 404
+
+    sid = _web_session_ids.get(project_id)
+    if not sid:
+        return jsonify({"error": "未捕获到 session_id。请先发起一次对话。"}), 400
+
+    data = request.get_json(silent=True) or {}
+    title = data.get("title", "").strip()
+    if not title:
+        return jsonify({"error": "title 不能为空"}), 400
+
+    try:
+        from claude_agent_sdk import rename_session
+        proj = _config.get_project(project_id)
+        rename_session(sid, title, directory=str(proj.directory))
+        return jsonify({"status": "ok", "title": title, "session_id": sid})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /fork ──
+@app.route("/api/chat/<project_id>/fork", methods=["POST"])
+def api_fork(project_id: str):
+    """Fork the current session into a new one."""
+    if project_id not in _project_ids:
+        return jsonify({"error": f"未知项目: {project_id}"}), 404
+
+    sid = _web_session_ids.get(project_id)
+    if not sid:
+        return jsonify({"error": "未捕获到 session_id。请先发起一次对话。"}), 400
+
+    try:
+        from claude_agent_sdk import fork_session
+        proj = _config.get_project(project_id)
+        result = fork_session(sid, directory=str(proj.directory))
+        return jsonify({
+            "status": "ok",
+            "original_session": sid,
+            "new_session": result.session_id,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /perm ──
+@app.route("/api/chat/<project_id>/perm", methods=["POST"])
+def api_perm(project_id: str):
+    """Switch permission mode."""
+    if project_id not in _project_ids:
+        return jsonify({"error": f"未知项目: {project_id}"}), 404
+
+    data = request.get_json(silent=True) or {}
+    mode = data.get("mode", "").strip()
+    valid = {"default", "acceptEdits", "bypassPermissions", "plan"}
+    if mode not in valid:
+        return jsonify({"error": f"无效模式。可选: {', '.join(sorted(valid))}"}), 400
+
+    try:
+        _run_agent_async(project_id, "set_permission_mode", mode)
+        return jsonify({"status": "ok", "mode": mode})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /model ──
+@app.route("/api/chat/<project_id>/model", methods=["POST"])
+def api_model(project_id: str):
+    """Switch model."""
+    if project_id not in _project_ids:
+        return jsonify({"error": f"未知项目: {project_id}"}), 404
+
+    data = request.get_json(silent=True) or {}
+    model_name = data.get("model", "").strip()
+    if not model_name:
+        return jsonify({"error": "model 不能为空"}), 400
+
+    try:
+        _run_agent_async(project_id, "set_model", model_name)
+        return jsonify({"status": "ok", "model": model_name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 def _describe_mcp_server_tools(server_name: str, config: dict) -> list[dict]:
     """Extract tool descriptions from an MCP server config."""
     tools = []
@@ -346,6 +494,31 @@ def index():
 
 def _sse(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _run_agent_async(project_id: str, method: str, *args):
+    """Call an async method on the SessionManager's agent client.
+
+    Schedules the coroutine on the boot thread's persistent event loop
+    via run_coroutine_threadsafe, since CC clients are bound to their
+    creation loop.  Works for one-shot calls: get_context_usage,
+    set_permission_mode, set_model, get_server_info.
+    (NOT for streaming calls.)
+    """
+    if not _mgr or not _ready.is_set():
+        raise RuntimeError("Agent 尚未就绪")
+    if _agent_loop is None:
+        raise RuntimeError("Agent event loop 未运行")
+    client = _mgr.get_client(project_id)
+    async_fn = getattr(client, method, None)
+    if async_fn is None:
+        raise RuntimeError(f"Client 没有方法: {method}")
+    if args:
+        coro = async_fn(*args)
+    else:
+        coro = async_fn()
+    future = asyncio.run_coroutine_threadsafe(coro, _agent_loop)
+    return future.result(timeout=30)
 
 
 async def _agent_query_safe(project_id: str, prompt: str, q: queue.Queue):
@@ -485,6 +658,22 @@ def _serialize_and_push(msg: Any, q: queue.Queue) -> None:
                        "content": _safe_dict(block.content)})
 
     elif isinstance(msg, ResultMessage):
+        # Track cost & session for /usage, /rename, /fork
+        if msg.session_id and _mgr:
+            try:
+                cur = _mgr._current_project
+                if cur:
+                    _web_session_ids[cur] = msg.session_id
+            except Exception:
+                pass
+        if msg.total_cost_usd is not None and _mgr:
+            try:
+                cur = _mgr._current_project
+                if cur:
+                    _web_total_costs[cur] = _web_total_costs.get(cur, 0.0) + msg.total_cost_usd
+                    _web_last_costs[cur] = msg.total_cost_usd
+            except Exception:
+                pass
         q.put({"type": "done",
                "cost": msg.total_cost_usd,
                "stop_reason": msg.stop_reason})
@@ -580,8 +769,10 @@ def _boot_agents() -> None:
     """Start all CC agents in a background event loop.
 
     Uses bypassPermissions mode — web UI has no terminal for canUseTool prompts.
+    Keeps the event loop alive so Flask request threads can schedule
+    coroutines on it via run_coroutine_threadsafe.
     """
-    global _mgr, _startup_error
+    global _mgr, _startup_error, _agent_loop
 
     from .session import SessionManager
     from .send_message import set_manager
@@ -595,6 +786,7 @@ def _boot_agents() -> None:
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    _agent_loop = loop
 
     try:
         async def _start():
@@ -607,12 +799,13 @@ def _boot_agents() -> None:
         print(f"  ✓ all agents ready", file=sys.stderr)
         _ready.set()
 
-        # Keep the event loop alive for agent operations
-        # (Flask request threads will create their own loops)
+        # Keep event loop alive for cross-thread agent calls
+        loop.run_forever()
     except Exception as e:
         _startup_error = str(e)
         print(f"  ✗ agent startup failed: {e}", file=sys.stderr)
     finally:
+        _agent_loop = None
         loop.close()
 
 
