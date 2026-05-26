@@ -480,6 +480,7 @@ async def _handle_command(
         print("  /compact [焦点] — 压缩对话历史以释放上下文")
         print("  /plan          — 进入 Plan 模式（只读分析）")
         print("  /fork          — 分支当前会话到新会话")
+        print("  /skills        — 列出可用技能")
         print("  /info          — 显示当前 session 信息")
         print("  /perm <模式>   — 切换权限模式 (default|acceptEdits|plan)")
         print("  /model <名称>  — 切换模型")
@@ -560,6 +561,13 @@ async def _handle_command(
             print(f"用 `sextant chat {cur_project} --resume {result.session_id}` 进入新会话。")
         except Exception as e:
             print(f"分支失败: {e}")
+    elif command == "/skills":
+        # Pass-through: CC CLI lists available skills (built-in + custom).
+        try:
+            async for msg in mgr.query(cur_project, "/skills"):
+                _display_message(msg, mgr, cur_project)
+        except Exception as e:
+            print(f"\n[错误] {e}", file=sys.stderr)
     elif command == "/chat":
         if len(parts) < 2:
             print("用法: /chat <项目ID>")
