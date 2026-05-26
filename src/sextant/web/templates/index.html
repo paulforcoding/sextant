@@ -383,6 +383,63 @@
     letter-spacing: 0.5px;
   }
 
+  .msg-content h2, .msg-content h3, .msg-content h4, .msg-content h5 {
+    margin: 8px 0 4px;
+    color: #fff;
+  }
+  .msg-content h2 { font-size: 18px; }
+  .msg-content h3 { font-size: 16px; }
+  .msg-content h4 { font-size: 14px; }
+  .msg-content h5 { font-size: 13px; }
+
+  .msg-content p { margin: 4px 0; }
+  .msg-content ul, .msg-content ol { margin: 4px 0; padding-left: 20px; }
+  .msg-content li { margin: 2px 0; }
+
+  .msg-content code {
+    background: rgba(124,140,248,0.15);
+    color: var(--accent-glow);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 12px;
+  }
+
+  .msg-content pre {
+    background: var(--tool-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 14px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .msg-content pre code {
+    background: none;
+    color: var(--text);
+    padding: 0;
+    font-size: 12px;
+  }
+
+  .msg-content blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 6px 0;
+    padding: 4px 12px;
+    color: var(--text-dim);
+  }
+
+  .msg-content hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 12px 0;
+  }
+
+  .msg-content strong {
+    color: #fff;
+  }
+
   /* ── Input ── */
   .input-area {
     padding: 16px 24px;
@@ -832,6 +889,7 @@ async function sendMessage() {
     const decoder = new TextDecoder();
     let buffer = '';
     let agentMsg = null;
+    let agentText = '';
     let cost = null;
 
     while (true) {
@@ -852,7 +910,8 @@ async function sendMessage() {
               if (!agentMsg) {
                 agentMsg = appendMessage('agent', '');
               }
-              agentMsg.querySelector('.msg-content').textContent += data.content;
+              agentText += data.content;
+              agentMsg.querySelector('.msg-content').innerHTML = renderMarkdown(agentText);
               break;
 
             case 'thinking':
@@ -936,7 +995,7 @@ function appendMessage(type, content, extra) {
       div.innerHTML = `<div class="role-label">YOU</div><div class="msg-content">${esc(content)}</div>`;
       break;
     case 'agent':
-      div.innerHTML = `<div class="role-label">${activeProject||'agent'}</div><div class="msg-content">${esc(content)}</div>`;
+      div.innerHTML = `<div class="role-label">${activeProject||'agent'}</div><div class="msg-content">${content ? renderMarkdown(content) : ''}</div>`;
       break;
     case 'thinking':
       if (!showThinking) return null;
@@ -1338,6 +1397,7 @@ async function streamPrompt(prompt, btn) {
     const decoder = new TextDecoder();
     let buffer = '';
     let agentMsg = null;
+    let agentText = '';
     while (true) {
       const {done, value} = await reader.read();
       if (done) break;
@@ -1351,7 +1411,8 @@ async function streamPrompt(prompt, btn) {
           switch (data.type) {
             case 'text':
               if (!agentMsg) agentMsg = appendMessage('agent', '');
-              agentMsg.querySelector('.msg-content').textContent += data.content;
+              agentText += data.content;
+              agentMsg.querySelector('.msg-content').innerHTML = renderMarkdown(agentText);
               break;
             case 'thinking': if (showThinking) appendMessage('thinking', data.content); break;
             case 'tool_use': appendMessage('tool', null, {name: data.name, input: data.input}); break;
@@ -1440,6 +1501,55 @@ function esc(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\n/g, '<br>');
+}
+
+function escHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderMarkdown(text) {
+  if (!text) return '';
+  // Protect fenced code blocks first (may contain HTML-like chars)
+  const codeBlocks = [];
+  let html = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    codeBlocks.push(`<pre><code>${escHtml(code)}</code></pre>`);
+    return `\0C${codeBlocks.length - 1}\0`;
+  });
+  // Escape HTML in remaining text
+  html = escHtml(html);
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Headers
+  html = html.replace(/^#### (.+)$/gm, '<h5>$1</h5>');
+  html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
+  html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
+  // Horizontal rules
+  html = html.replace(/^---$/gm, '<hr>');
+  // Unordered lists
+  html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+  // Ordered lists
+  html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+  // Blockquotes
+  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+  // Double newlines → paragraph breaks
+  html = html.replace(/\n\n+/g, '</p><p>');
+  // Single newlines → <br>
+  html = html.replace(/\n/g, '<br>');
+  // Wrap
+  html = '<p>' + html + '</p>';
+  // Group consecutive <li> into <ul>
+  html = html.replace(/((?:<li>.*?<\/li>)+)/g, '<ul>$1</ul>');
+  // Group consecutive <blockquote>
+  html = html.replace(/((?:<blockquote>.*?<\/blockquote>)+)/g, '<div class="md-blockquote">$1</div>');
+  // Clean empty paragraphs
+  html = html.replace(/<p><\/p>/g, '');
+  // Restore code blocks
+  html = html.replace(/\0C(\d+)\0/g, (_, i) => codeBlocks[parseInt(i)]);
+  return html;
 }
 
 function formatToolInput(input) {
