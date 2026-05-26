@@ -476,6 +476,7 @@ async def _handle_command(
         print("  /context [all] — 上下文窗口用量")
         print("  /usage         — 费用/用量统计")
         print("  /rename [标题] — 重命名当前会话")
+        print("  /compact [焦点] — 压缩对话历史以释放上下文")
         print("  /info          — 显示当前 session 信息")
         print("  /perm <模式>   — 切换权限模式 (default|acceptEdits|plan)")
         print("  /model <名称>  — 切换模型")
@@ -524,6 +525,19 @@ async def _handle_command(
             print(f"会话重命名 → {title}")
         except Exception as e:
             print(f"重命名失败: {e}")
+    elif command == "/compact":
+        # Pass-through: CC CLI intercepts /compact as a built-in slash command.
+        # The SDK sends it as a user message; CC CLI handles it internally
+        # (generates summary, appends compact_boundary to JSONL).
+        instructions = " ".join(parts[1:]) if len(parts) > 1 else None
+        prompt = f"/compact {instructions}" if instructions else "/compact"
+        print(f"压缩中{'（焦点: ' + instructions + '）' if instructions else ''}…", flush=True)
+        try:
+            async for msg in mgr.query(cur_project, prompt):
+                _display_message(msg, mgr, cur_project)
+        except Exception as e:
+            print(f"\n[错误] {e}", file=sys.stderr)
+        print("✓ 压缩完成。用 /context 查看新占比。")
     elif command == "/chat":
         if len(parts) < 2:
             print("用法: /chat <项目ID>")
