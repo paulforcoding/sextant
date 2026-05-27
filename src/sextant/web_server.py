@@ -434,6 +434,72 @@ def api_model(project_id: str):
         return jsonify({"error": str(e)}), 500
 
 
+# ── /skills ──
+@app.route("/api/chat/<project_id>/skills")
+def api_skills(project_id: str):
+    """List available skills from filesystem (SKILL.md files)."""
+    skills = []
+    proj = _config.get_project(project_id)
+    proj_dir = Path(proj.directory).expanduser().resolve()
+
+    # Scan: project .claude/skills/, global ~/.claude/skills/
+    search_dirs = [
+        (proj_dir / ".claude" / "skills", "project"),
+        (Path.home() / ".claude" / "skills", "global"),
+    ]
+    for base, source in search_dirs:
+        if not base.is_dir():
+            continue
+        for skill_dir in sorted(base.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.is_file():
+                continue
+            try:
+                name = skill_dir.name
+                desc = ""
+                with open(skill_md) as f:
+                    in_frontmatter = False
+                    for line in f:
+                        stripped = line.strip()
+                        if stripped == "---":
+                            if not in_frontmatter:
+                                in_frontmatter = True
+                                continue
+                            else:
+                                break
+                        if in_frontmatter:
+                            if stripped.startswith("description:"):
+                                desc = stripped.split(":", 1)[1].strip()
+                if not desc:
+                    # Fallback: use first non-empty, non-heading line after frontmatter
+                    with open(skill_md) as f:
+                        after_fm = False
+                        for line in f:
+                            if after_fm:
+                                s = line.strip()
+                                if s and not s.startswith("#"):
+                                    desc = s[:120]
+                                    break
+                            if line.strip() == "---" and not after_fm:
+                                after_fm = True
+                                # second ---
+                skills.append({
+                    "name": name,
+                    "description": desc,
+                    "source": source,
+                })
+            except Exception:
+                skills.append({"name": skill_dir.name, "description": "", "source": source})
+
+    return jsonify({
+        "project": project_id,
+        "skills": skills,
+        "total": len(skills),
+    })
+
+
 def _describe_mcp_server_tools(server_name: str, config: dict) -> list[dict]:
     """Extract tool descriptions from an MCP server config."""
     tools = []
