@@ -12,6 +12,9 @@ build/
 # Claude Code sessions (per-user, not project)
 .claude/
 
+# uv
+uv.lock
+
 # IDE
 .vscode/
 .idea/
