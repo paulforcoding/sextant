@@ -33,6 +33,7 @@ app = Flask(__name__, template_folder=str(_HERE / "web" / "templates"))
 
 _mgr: Any = None           # SessionManager — None until agents are ready
 _streams: dict[str, "queue.Queue[dict]"] = {}
+_streaming_locks: dict[str, "asyncio.Lock"] = {}
 _agent_loop: asyncio.AbstractEventLoop | None = None  # kept alive for cross-thread agent calls
 _config: Any = None
 _project_ids: list[str] = []
@@ -101,12 +102,22 @@ def api_chat(project_id: str):
     if not prompt:
         return jsonify({"error": "prompt 不能为空"}), 400
 
-    # Create SSE queue and launch background query
+    # Create SSE queue and launch background query on _agent_loop
     q: queue.Queue[dict] = queue.Queue()
     _streams[project_id] = q
 
     def _run():
-        asyncio.run(_agent_query_safe(project_id, prompt, q))
+        coro = _agent_query_reuse_client(project_id, prompt, q)
+        future = asyncio.run_coroutine_threadsafe(coro, _agent_loop)
+        try:
+            future.result()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                q.put_nowait({"type": "error", "message": str(e)})
+            except Exception:
+                pass
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({"status": "ok"})
@@ -521,95 +532,31 @@ def _run_agent_async(project_id: str, method: str, *args):
     return future.result(timeout=30)
 
 
-async def _agent_query_safe(project_id: str, prompt: str, q: queue.Queue):
-    """Wrapper with error handling."""
-    try:
-        await _agent_query(project_id, prompt, q)
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"[web] agent query error: {e}\n{tb}", file=sys.stderr, flush=True)
-        try:
-            q.put({"type": "error", "message": str(e)})
-        except Exception:
-            pass
+async def _agent_query_reuse_client(project_id: str, prompt: str, q: queue.Queue):
+    """Run agent query reusing SessionManager's persistent client.
 
+    Must run on _agent_loop (scheduled via run_coroutine_threadsafe).
+    Uses a per-project asyncio.Lock to serialize concurrent queries.
+    """
+    lock = _streaming_locks.setdefault(project_id, asyncio.Lock())
+    async with lock:
+        if not _mgr or not _ready.is_set():
+            q.put({"type": "error", "message": "Agent 尚未就绪"})
+            return
 
-async def _agent_query(project_id: str, prompt: str, q: queue.Queue):
-    """Run agent query with a fresh CC client (avoids cross-loop issues)."""
+        client = _mgr.get_client(project_id)
+        _mgr.set_current_project(project_id)
 
-    try:
-        from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
-        import json as _json
+        full_prompt = _build_full_prompt(project_id, prompt)
 
-        # Get project config
-        proj = _config.get_project(project_id)
-        cwd = str(proj.directory)
+        t0 = time.time()
+        await client.query(full_prompt)
 
-        # Load env
-        env = {}
-        try:
-            with open(Path.home() / ".claude" / "settings.json") as f:
-                env = _json.load(f).get("env", {})
-        except Exception:
-            pass
+        async for msg in client.receive_response():
+            _serialize_and_push(msg, q)
 
-        opts = ClaudeAgentOptions(
-            cwd=cwd,
-            permission_mode=proj.permission_mode or _config.permission_mode or "bypassPermissions",
-            setting_sources=["project"],
-            continue_conversation=proj.continue_conversation,
-            resume=proj.session_id,
-            env=env,
-            mcp_servers={"sextant": _get_mcp_server()},
-            system_prompt={
-                "type": "preset",
-                "preset": "claude_code",
-                "append": (
-                    f"你的项目是 **{project_id}**。\n\n"
-                    f"可以通过 `send_message(to, subject, body)` 向其他项目发送消息。\n"
-                    f"可用项目: {', '.join(p for p in _project_ids if p != project_id)}。\n"
-                    f"消息发送后对方会在下次查看时收到。仅在用户明确要求时使用。"
-                ),
-            },
-        )
-
-        async with ClaudeSDKClient(options=opts) as client:
-            # Set sender identity for send_message tool
-            if _mgr:
-                _mgr.set_current_project(project_id)
-
-            # Build prompt with mailbox messages
-            full_prompt = _build_full_prompt(project_id, prompt)
-
-            t0 = time.time()
-            await client.query(full_prompt)
-
-            async for msg in client.receive_response():
-                _serialize_and_push(msg, q)
-
-            elapsed = time.time() - t0
-            q.put({"type": "done", "elapsed": round(elapsed, 1)})
-
-    except Exception as e:
-        q.put({"type": "error", "message": str(e)})
-
-
-def _get_mcp_server():
-    """Create an MCP server with the send_message tool (cached)."""
-    if _get_mcp_server._cached is not None:
-        return _get_mcp_server._cached
-    from claude_agent_sdk import create_sdk_mcp_server
-    from .send_message import send_message_tool
-    server = create_sdk_mcp_server(
-        name="sextant",
-        version="0.2.0",
-        tools=[send_message_tool],
-    )
-    _get_mcp_server._cached = server
-    return server
-
-_get_mcp_server._cached = None
+        elapsed = time.time() - t0
+        q.put({"type": "done", "elapsed": round(elapsed, 1)})
 
 
 def _build_full_prompt(project_id: str, user_prompt: str) -> str:
