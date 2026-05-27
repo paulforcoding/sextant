@@ -754,11 +754,12 @@ async function selectAgent(projectId) {
   const content = document.getElementById('content');
   content.innerHTML = `
     <div class="chat-area" id="messages"></div>
-    <form class="input-area" id="input-row" onsubmit="event.preventDefault(); sendMessage(); return false;">
+    <div class="input-area" id="input-row">
       <textarea id="prompt-input" rows="1"
-        placeholder="输入消息..."></textarea>
-      <button id="send-btn" type="submit">发送</button>
-    </form>
+        placeholder="输入消息..."
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();sendMessage()}"></textarea>
+      <button id="send-btn" onclick="sendMessage()">发送</button>
+    </div>
   `;
 
   const container = document.getElementById('messages');
@@ -885,8 +886,9 @@ async function sendMessage() {
         sendToAgent(prompt);
         return;
       case '/skills':
-        await handleSkills();
-        break;
+        // Pass through to agent — CC SDK handles skill discovery
+        sendToAgent(prompt);
+        return;
       default:
         appendSystem(`未知命令: ${cmd}\n\n可用命令: /help, /agents, /mcp, /context, /usage, /info, /rename, /fork, /plan, /perm, /model, /status, /clear, /compact, /skills`);
     }
@@ -1406,31 +1408,7 @@ function handleClear() {
   if (container) container.innerHTML = '';
 }
 
-// ── /skills ──
-async function handleSkills() {
-  if (!activeProject) { appendSystem('请先选择一个 Agent。'); return; }
-  try {
-    const res = await fetch(`/api/chat/${activeProject}/skills`);
-    const data = await res.json();
-    if (data.error) { appendSystem(`❌ ${data.error}`); return; }
-    const skills = data.skills || [];
-    if (skills.length === 0) {
-      appendSystem('没有找到任何技能。');
-      return;
-    }
-    let html = `<div style="margin-bottom:8px;font-size:12px;color:var(--text-dim)">共 ${data.total} 个技能</div>`;
-    for (const s of skills) {
-      html += `<div style="margin-bottom:10px;padding:10px 12px;background:var(--card);border-radius:var(--radius-sm);border:1px solid var(--border)">
-        <div style="font-weight:600;color:#fff;font-size:14px">${esc(s.name)}</div>
-        ${s.description ? `<div style="font-size:12px;color:var(--text-dim);margin-top:4px">${esc(s.description)}</div>` : ''}
-        <div style="font-size:11px;color:var(--thinking);margin-top:2px">${esc(s.source)}</div>
-      </div>`;
-    }
-    appendSystem(html, true);
-  } catch (e) { appendSystem(`❌ ${e.message}`); }
-}
-
-// ── Send slash command through to agent (for /compact) ──
+// ── Send slash command through to agent (for /compact and /skills) ──
 function sendToAgent(prompt) {
   const input = document.getElementById('prompt-input');
   const btn = document.getElementById('send-btn');
