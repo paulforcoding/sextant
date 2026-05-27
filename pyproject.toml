@@ -5,6 +5,7 @@ description = "Multi-project agent collaboration tool — manage multiple Claude
 requires-python = ">=3.10"
 dependencies = [
     "claude-agent-sdk>=0.2.0",
+    "flask>=3.0",
     "pyyaml>=6.0",
 ]
 
