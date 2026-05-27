@@ -215,6 +215,21 @@
     color: var(--text);
   }
 
+  .setting-select {
+    background: var(--sidebar);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    padding: 4px 8px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+    max-width: 140px;
+  }
+
+  .setting-select:focus { border-color: var(--accent); }
+
   /* ── Toggle switch ── */
   .toggle-switch {
     position: relative;
@@ -624,6 +639,15 @@
         <span class="toggle-slider"></span>
       </label>
     </div>
+    <div class="setting-row">
+      <span class="label">权限模式</span>
+      <select id="perm-mode-select" onchange="updatePermSetting()" class="setting-select">
+        <option value="bypassPermissions">全部放行</option>
+        <option value="acceptEdits">自动通过编辑</option>
+        <option value="default">标准（弹窗审批）</option>
+        <option value="plan">Plan 模式（只读）</option>
+      </select>
+    </div>
   </div>
 </aside>
 
@@ -652,6 +676,7 @@ let activeView = null;        // 'chat' | 'mailbox'
 let streamingAbort = null;
 const chatCache = {};         // projectId → messages.innerHTML (preserved across switches)
 let showThinking = true;      // settings: show LLM thinking blocks
+let permMode = 'bypassPermissions';  // settings: permission mode
 
 // ══════════════════════════════════════════════════════════════
 // Init
@@ -663,6 +688,11 @@ async function init() {
     if (saved !== null) {
       showThinking = saved === 'true';
       document.getElementById('toggle-thinking').checked = showThinking;
+    }
+    const savedPerm = localStorage.getItem('sextant_permMode');
+    if (savedPerm) {
+      permMode = savedPerm;
+      document.getElementById('perm-mode-select').value = savedPerm;
     }
   } catch (_) {}
 
@@ -716,6 +746,9 @@ async function selectAgent(projectId) {
   // Header
   document.getElementById('header-title').textContent = projectId;
   document.getElementById('header-status').textContent = '';
+
+  // Apply saved permission mode to this agent
+  applyPermMode(projectId);
 
   // Build chat UI
   const content = document.getElementById('content');
@@ -1479,6 +1512,25 @@ function updateThinkingSetting() {
   try {
     localStorage.setItem('sextant_showThinking', String(showThinking));
   } catch (_) {}
+}
+
+function updatePermSetting() {
+  permMode = document.getElementById('perm-mode-select').value;
+  try {
+    localStorage.setItem('sextant_permMode', permMode);
+  } catch (_) {}
+  if (activeProject) applyPermMode(activeProject);
+}
+
+async function applyPermMode(projectId) {
+  // bypassPermissions can only be set at boot — skip runtime call
+  if (permMode === 'bypassPermissions') return;
+  try {
+    await fetch(`/api/chat/${projectId}/perm`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: permMode}),
+    });
+  } catch (_) { /* silent */ }
 }
 
 // Close popup when clicking outside

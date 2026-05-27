@@ -768,7 +768,7 @@ def create_app(config_path: str = "sextant.yaml") -> Flask:
 def _boot_agents() -> None:
     """Start all CC agents in a background event loop.
 
-    Uses bypassPermissions mode — web UI has no terminal for canUseTool prompts.
+    Boots with bypassPermissions — other modes switchable via settings.
     Keeps the event loop alive so Flask request threads can schedule
     coroutines on it via run_coroutine_threadsafe.
     """
@@ -777,7 +777,9 @@ def _boot_agents() -> None:
     from .session import SessionManager
     from .send_message import set_manager
 
-    # bypassPermissions: web workers have no terminal for input()
+    # bypassPermissions: web workers have no terminal for input().
+    # This is the only mode that can't be switched at runtime, so it
+    # must be set at boot.  Other modes can be changed from settings.
     for proj in _config.projects:
         if not proj.permission_mode:
             proj.permission_mode = "bypassPermissions"
