@@ -1413,7 +1413,6 @@ function sendToAgent(prompt) {
   const input = document.getElementById('prompt-input');
   const btn = document.getElementById('send-btn');
   // Bypass slash handling — send as regular prompt
-  appendMessage('user', prompt);
   scrollToBottom();
   btn.disabled = true;
   streamingAbort = new AbortController();
