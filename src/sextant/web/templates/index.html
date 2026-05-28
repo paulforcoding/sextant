@@ -760,6 +760,8 @@ function renderAgentList(projects) {
 async function selectAgent(projectId) {
   // Abort any active stream
   if (streamingAbort) { streamingAbort.abort(); streamingAbort = null; }
+  // Reset render batching state
+  _renderScheduled = false; _renderMsg = null; _renderText = '';
 
   // Save current chat HTML to cache before switching away
   if (activeProject && activeView === 'chat') {
@@ -974,20 +976,28 @@ async function sendMessage() {
   appendMessage('user', prompt);
   scrollToBottom();
 
-  // Start SSE
+  // Stream response
+  await streamResponse(prompt, btn);
+}
+
+// Shared SSE streaming — used by both normal messages and passthrough commands.
+async function streamResponse(prompt, btn) {
+  // Reset render state for new stream
+  _renderScheduled = false;
+  _renderMsg = null;
+  _renderText = '';
+
   streamingAbort = new AbortController();
   document.getElementById('header-status').innerHTML =
     '<span class="streaming-indicator"></span>处理中...';
 
   try {
-    // POST prompt
     await fetch(`/api/chat/${activeProject}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({prompt}),
     });
 
-    // SSE stream
     const res = await fetch(`/api/chat/${activeProject}/stream`, {
       signal: streamingAbort.signal,
     });
@@ -1018,7 +1028,7 @@ async function sendMessage() {
                 agentMsg = appendMessage('agent', '');
               }
               agentText += data.content;
-              agentMsg.querySelector('.msg-content').innerHTML = renderMarkdown(agentText);
+              scheduleRender(agentMsg, agentText);
               break;
 
             case 'thinking':
@@ -1053,6 +1063,13 @@ async function sendMessage() {
 
             case 'done':
               cost = data.cost;
+              // Flush any pending render before marking done
+              if (_renderScheduled && _renderMsg) {
+                _renderMsg.querySelector('.msg-content').innerHTML = renderMarkdown(_renderText);
+                _renderScheduled = false;
+                _renderMsg = null;
+                _renderText = '';
+              }
               document.getElementById('header-status').textContent =
                 cost != null
                   ? `完成 · $${cost.toFixed(4)} · ${data.elapsed}s`
@@ -1080,6 +1097,30 @@ async function sendMessage() {
     btn.disabled = false;
     streamingAbort = null;
     document.getElementById('prompt-input')?.focus();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Batched markdown rendering (rAF-throttled to prevent layout storms)
+// ══════════════════════════════════════════════════════════════
+let _renderScheduled = false;
+let _renderMsg = null;
+let _renderText = '';
+
+function scheduleRender(msgEl, fullText) {
+  _renderMsg = msgEl;
+  _renderText = fullText;
+  if (!_renderScheduled) {
+    _renderScheduled = true;
+    requestAnimationFrame(() => {
+      _renderScheduled = false;
+      if (_renderMsg) {
+        _renderMsg.querySelector('.msg-content').innerHTML = renderMarkdown(_renderText);
+        _renderMsg = null;
+        _renderText = '';
+      }
+      scrollToBottom();
+    });
   }
 }
 
@@ -1144,6 +1185,7 @@ function appendCost(cost, elapsed) {
 // ══════════════════════════════════════════════════════════════
 async function showMailbox() {
   if (streamingAbort) { streamingAbort.abort(); streamingAbort = null; }
+  _renderScheduled = false; _renderMsg = null; _renderText = '';
 
   activeProject = null;
   activeView = 'mailbox';
@@ -1479,68 +1521,10 @@ function handleClear() {
 }
 
 // ── Send slash command through to agent (for /compact and /skills) ──
-function sendToAgent(prompt) {
-  const input = document.getElementById('prompt-input');
+async function sendToAgent(prompt) {
   const btn = document.getElementById('send-btn');
-  // Bypass slash handling — send as regular prompt
-  scrollToBottom();
   btn.disabled = true;
-  streamingAbort = new AbortController();
-  document.getElementById('header-status').innerHTML = '<span class="streaming-indicator"></span>处理中...';
-
-  // Rest of the send logic continues inline below
-  streamPrompt(prompt, btn);
-}
-
-async function streamPrompt(prompt, btn) {
-  try {
-    await fetch(`/api/chat/${activeProject}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({prompt}),
-    });
-    const res = await fetch(`/api/chat/${activeProject}/stream`, {signal: streamingAbort.signal});
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let agentMsg = null;
-    let agentText = '';
-    while (true) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, {stream: true});
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const data = JSON.parse(line.slice(6));
-          switch (data.type) {
-            case 'text':
-              if (!agentMsg) agentMsg = appendMessage('agent', '');
-              agentText += data.content;
-              agentMsg.querySelector('.msg-content').innerHTML = renderMarkdown(agentText);
-              break;
-            case 'thinking': if (showThinking) appendMessage('thinking', data.content); break;
-            case 'tool_use': appendMessage('tool', null, {name: data.name, input: data.input}); break;
-            case 'tool_result': appendMessage('tool-result', data.content, {is_error: data.is_error}); break;
-            case 'server_tool': appendMessage('tool', `🔧 ${data.name}`, {name: data.name, input: data.input}); break;
-            case 'server_tool_result': appendMessage('tool-result', JSON.stringify(data.content).slice(0, 500)); break;
-            case 'done':
-              document.getElementById('header-status').textContent = data.cost != null ? `完成 · $${data.cost.toFixed(4)} · ${data.elapsed}s` : `完成 · ${data.elapsed}s`;
-              if (data.cost != null) appendCost(data.cost, data.elapsed);
-              break;
-            case 'error': appendMessage('agent', `❌ ${data.message}`); document.getElementById('header-status').textContent = '错误'; break;
-          }
-        } catch (_) {}
-      }
-      scrollToBottom();
-    }
-  } catch (e) {
-    if (e.name !== 'AbortError') { appendMessage('agent', `❌ 连接错误: ${e.message}`); document.getElementById('header-status').textContent = '连接错误'; }
-  } finally {
-    btn.disabled = false; streamingAbort = null;
-    document.getElementById('prompt-input')?.focus();
-  }
+  await streamResponse(prompt, btn);
 }
 
 // ── Progress bar helper ──

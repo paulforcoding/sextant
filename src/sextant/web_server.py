@@ -564,8 +564,13 @@ async def _agent_query_reuse_client(project_id: str, prompt: str, q: queue.Queue
         t0 = time.time()
         await client.query(full_prompt)
 
+        # Track streaming counts: "text" and "thinking" keys record how
+        # many characters have been sent via StreamEvent deltas, so we can
+        # skip the complete block from AssistantMessage to avoid duplication.
+        streamed_counts: dict[str, int] = {}
+
         async for msg in client.receive_response():
-            _serialize_and_push(msg, q)
+            _serialize_and_push(msg, q, streamed_counts)
 
         elapsed = time.time() - t0
         q.put({"type": "done", "elapsed": round(elapsed, 1)})
@@ -587,21 +592,37 @@ def _build_full_prompt(project_id: str, user_prompt: str) -> str:
     return user_prompt
 
 
-def _serialize_and_push(msg: Any, q: queue.Queue) -> None:
-    """Convert an SDK message to JSON and push to SSE queue."""
+def _serialize_and_push(msg: Any, q: queue.Queue, streamed_counts: dict[str, int]) -> None:
+    """Convert an SDK message to JSON and push to SSE queue.
+
+    *streamed_counts* tracks how many characters of text/thinking have been
+    sent via StreamEvent deltas.  When a complete block arrives from
+    AssistantMessage we skip it if deltas already covered it (keyed by
+    the block text hash for a rough dedup check).
+    """
     from claude_agent_sdk import (
-        AssistantMessage, ResultMessage,
+        AssistantMessage, ResultMessage, StreamEvent,
         TextBlock, ThinkingBlock,
         ToolUseBlock, ToolResultBlock,
         ServerToolUseBlock, ServerToolResultBlock,
     )
 
-    if isinstance(msg, AssistantMessage):
+    if isinstance(msg, StreamEvent):
+        _handle_stream_event(msg, q, streamed_counts)
+
+    elif isinstance(msg, AssistantMessage):
         for block in msg.content:
             if isinstance(block, ThinkingBlock):
-                q.put({"type": "thinking", "content": block.thinking.strip()})
+                thinking = block.thinking.strip()
+                if thinking and streamed_counts.get("thinking", 0) == 0:
+                    q.put({"type": "thinking", "content": thinking})
+                streamed_counts["thinking"] = 0
             elif isinstance(block, TextBlock) and block.text:
-                q.put({"type": "text", "content": block.text})
+                # If deltas already sent this text character-by-character,
+                # skip the complete block to avoid duplication.
+                if streamed_counts.get("text", 0) == 0:
+                    q.put({"type": "text", "content": block.text})
+                streamed_counts["text"] = 0
             elif isinstance(block, ToolUseBlock):
                 q.put({"type": "tool_use", "name": block.name,
                        "input": _safe_dict(block.input)})
@@ -636,6 +657,40 @@ def _serialize_and_push(msg: Any, q: queue.Queue) -> None:
         q.put({"type": "done",
                "cost": msg.total_cost_usd,
                "stop_reason": msg.stop_reason})
+
+
+def _handle_stream_event(msg: Any, q: queue.Queue, counts: dict[str, int]) -> None:
+    """Extract text/thinking deltas from a raw Anthropic API StreamEvent."""
+    event = msg.event
+    if not isinstance(event, dict):
+        return
+    etype = event.get("type", "")
+
+    if etype == "content_block_delta":
+        delta = event.get("delta", {})
+        if not isinstance(delta, dict):
+            return
+        dtype = delta.get("type", "")
+        if dtype == "text_delta":
+            text = delta.get("text", "")
+            if text:
+                counts["text"] = counts.get("text", 0) + len(text)
+                q.put({"type": "text", "content": text})
+        elif dtype == "thinking_delta":
+            thinking = delta.get("thinking", "")
+            if thinking:
+                counts["thinking"] = counts.get("thinking", 0) + len(thinking)
+                q.put({"type": "thinking", "content": thinking})
+
+    elif etype == "content_block_start":
+        block = event.get("content_block", {})
+        if isinstance(block, dict) and block.get("type") == "text":
+            counts["text"] = 0
+        elif isinstance(block, dict) and block.get("type") == "thinking":
+            counts["thinking"] = 0
+        elif isinstance(block, dict) and block.get("type") == "tool_use":
+            q.put({"type": "tool_use", "name": block.get("name", ""),
+                   "input": block.get("input", {})})
 
 
 def _safe_dict(obj: Any) -> dict:
