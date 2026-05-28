@@ -577,7 +577,13 @@ async def _agent_query_reuse_client(project_id: str, prompt: str, q: queue.Queue
 
 
 def _build_full_prompt(project_id: str, user_prompt: str) -> str:
-    """Prepend pending mailbox messages if any."""
+    """Prepend pending mailbox messages if not already in the user prompt.
+
+    When the web UI pre-fills the textarea with formatted pending messages,
+    we detect this by checking whether the prompt starts with the same
+    formatted block.  If it does we skip the prepend to avoid duplication
+    but still mark the messages as delivered.
+    """
     try:
         if _mgr:
             pending = _mgr.mailbox.get_pending(to=project_id)
@@ -585,8 +591,12 @@ def _build_full_prompt(project_id: str, user_prompt: str) -> str:
                 msgs = []
                 for m in pending:
                     msgs.append(f"[来自 {m['from']}] {m['subject']}\n\n{m['body']}")
+                formatted = "\n\n".join(msgs)
                 _mgr.mark_mailbox_delivered(project_id)
-                return "\n\n".join(msgs) + f"\n\n---\n\n{user_prompt}"
+                # If the textarea was pre-filled, don't double-include
+                if user_prompt.startswith(formatted):
+                    return user_prompt
+                return formatted + f"\n\n---\n\n{user_prompt}"
     except Exception:
         pass
     return user_prompt

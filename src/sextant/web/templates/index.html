@@ -842,10 +842,15 @@ async function fetchMailboxDraft(projectId, container) {
     const pending = await res.json();
     if (!Array.isArray(pending) || pending.length === 0) return;
 
+    // Build formatted message text (same format as server-side _build_full_prompt)
+    const msgs = pending.map(m => `[来自 ${m.from}] ${m.subject}\n\n${m.body}`);
+    const formatted = msgs.join('\n\n');
+
+    // Show system bubble
     const div = document.createElement('div');
     div.className = 'msg system';
     div.innerHTML = `<div class="role-label">📬 Mailbox</div>
-      <div class="msg-content">你有 <b>${pending.length}</b> 条待处理消息，将在下次发送时自动附加到你的消息中：
+      <div class="msg-content">你有 <b>${pending.length}</b> 条待处理消息，已填入输入框，可直接编辑发送：
         ${pending.map((m, i) => `
           <div class="draft-card">
             <div class="draft-card-header">${i + 1}. 来自 <b>${esc(m.from)}</b> · ${esc(m.subject)}</div>
@@ -854,6 +859,15 @@ async function fetchMailboxDraft(projectId, container) {
         `).join('')}
       </div>`;
     container.prepend(div);
+
+    // Pre-fill textarea with formatted messages
+    const input = document.getElementById('prompt-input');
+    if (input) {
+      input.value = formatted;
+      // Trigger auto-resize
+      input.style.height = 'auto';
+      input.style.height = (input.scrollHeight) + 'px';
+    }
   } catch (_) {}
 }
 
