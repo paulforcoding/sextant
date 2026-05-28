@@ -211,6 +211,18 @@ def api_pending(project_id: str):
     return jsonify(pending)
 
 
+@app.route("/api/chat/<project_id>/consume-pending", methods=["POST"])
+def api_consume_pending(project_id: str):
+    """Mark specific mailbox messages as delivered so they won't reappear."""
+    if not _ready.is_set() or not _mgr:
+        return jsonify({"status": "not_ready"}), 503
+    data = request.get_json(silent=True) or {}
+    msg_ids = data.get("msg_ids", [])
+    if msg_ids:
+        _mgr.mailbox.mark_delivered(msg_ids)
+    return jsonify({"status": "ok", "consumed": len(msg_ids)})
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Slash commands
 # ═══════════════════════════════════════════════════════════════════════════

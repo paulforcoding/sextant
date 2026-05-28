@@ -883,6 +883,16 @@ async function fetchMailboxDraft(projectId, container) {
       input.style.height = 'auto';
       input.style.height = (input.scrollHeight) + 'px';
     }
+
+    // Mark messages as delivered so they won't reappear on next visit
+    const ids = fresh.map(m => m.msg_id).filter(Boolean);
+    if (ids.length > 0) {
+      fetch(`/api/chat/${projectId}/consume-pending`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({msg_ids: ids}),
+      }).catch(() => {});
+    }
   } catch (_) {}
 }
 
