@@ -707,6 +707,7 @@ let streamingAbort = null;
 const chatCache = {};         // projectId → messages.innerHTML (preserved across switches)
 let showThinking = true;      // settings: show LLM thinking blocks
 let permMode = 'bypassPermissions';  // settings: permission mode
+const shownMsgIds = {};        // projectId → Set of msg_ids already shown in textarea
 let chatInputHistory = [];    // input history for up/down arrow navigation
 let historyIndex = -1;        // current position in history (-1 = not navigating)
 let historyDraft = '';        // saved draft before navigating history
@@ -764,10 +765,15 @@ async function selectAgent(projectId) {
   _renderScheduled = false; _renderMsg = null; _renderText = '';
 
   // Save current chat HTML to cache before switching away
+  // (exclude ephemeral system bubbles — they are re-fetched on re-entry)
   if (activeProject && activeView === 'chat') {
     const msgs = document.getElementById('messages');
     if (msgs && msgs.children.length > 0) {
-      chatCache[activeProject] = msgs.innerHTML;
+      const clone = msgs.cloneNode(true);
+      clone.querySelectorAll('.msg.system').forEach(el => el.remove());
+      if (clone.children.length > 0) {
+        chatCache[activeProject] = clone.innerHTML;
+      }
     }
   }
 
@@ -842,16 +848,25 @@ async function fetchMailboxDraft(projectId, container) {
     const pending = await res.json();
     if (!Array.isArray(pending) || pending.length === 0) return;
 
+    // Filter out messages already shown this session
+    const seen = shownMsgIds[projectId] || new Set();
+    const fresh = pending.filter(m => m.msg_id && !seen.has(m.msg_id));
+    if (fresh.length === 0) return;
+
+    // Track newly shown msg_ids
+    if (!shownMsgIds[projectId]) shownMsgIds[projectId] = new Set();
+    fresh.forEach(m => { if (m.msg_id) shownMsgIds[projectId].add(m.msg_id); });
+
     // Build formatted message text (same format as server-side _build_full_prompt)
-    const msgs = pending.map(m => `[来自 ${m.from}] ${m.subject}\n\n${m.body}`);
+    const msgs = fresh.map(m => `[来自 ${m.from}] ${m.subject}\n\n${m.body}`);
     const formatted = msgs.join('\n\n');
 
     // Show system bubble
     const div = document.createElement('div');
     div.className = 'msg system';
     div.innerHTML = `<div class="role-label">📬 Mailbox</div>
-      <div class="msg-content">你有 <b>${pending.length}</b> 条待处理消息，已填入输入框，可直接编辑发送：
-        ${pending.map((m, i) => `
+      <div class="msg-content">你有 <b>${fresh.length}</b> 条待处理消息，已填入输入框，可直接编辑发送：
+        ${fresh.map((m, i) => `
           <div class="draft-card">
             <div class="draft-card-header">${i + 1}. 来自 <b>${esc(m.from)}</b> · ${esc(m.subject)}</div>
             <div class="draft-card-body">${esc(m.body)}</div>
@@ -996,6 +1011,9 @@ async function sendMessage() {
 
 // Shared SSE streaming — used by both normal messages and passthrough commands.
 async function streamResponse(prompt, btn) {
+  // Clear shown msg tracking for this project (messages will be delivered server-side)
+  delete shownMsgIds[activeProject];
+
   // Reset render state for new stream
   _renderScheduled = false;
   _renderMsg = null;
