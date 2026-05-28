@@ -29,8 +29,8 @@ class Mailbox:
             base_dir = Path.home() / ".sextant" / "mailbox"
         self._base = Path(base_dir)
         self._base.mkdir(parents=True, exist_ok=True)
-        # In-memory set of delivered msg_ids for this session.
-        # On restart, previously-delivered messages may show again — acceptable.
+        # In-memory cache of delivered msg_ids (also persisted to JSONL files).
+        # Serves as a fast check so we don't re-read files for every query.
         self._delivered: set[str] = set()
 
     # -- write -------------------------------------------------------
@@ -97,8 +97,39 @@ class Mailbox:
         return count
 
     def mark_delivered(self, msg_ids: list[str]) -> None:
-        """Mark messages as delivered (in-memory — survives only this session)."""
+        """Mark messages as delivered — persists status to JSONL files.
+
+        Rewrites affected JSONL lines so the status change survives
+        server restarts.  Uses atomic write-via-temp+rename.
+        """
+        if not msg_ids:
+            return
         self._delivered.update(msg_ids)
+        ids = set(msg_ids)
+
+        for file in self._all_readable_files():
+            modified = False
+            lines: list[str] = []
+            with open(file) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        lines.append(line)
+                        continue
+                    if (
+                        entry.get("msg_id") in ids
+                        and entry.get("status") == "pending"
+                    ):
+                        entry["status"] = "delivered"
+                        modified = True
+                    lines.append(json.dumps(entry, ensure_ascii=False) + "\n")
+
+            if modified:
+                tmp = file.with_suffix(file.suffix + ".tmp")
+                with open(tmp, "w") as f:
+                    f.writelines(lines)
+                tmp.replace(file)
 
     def query(
         self,
