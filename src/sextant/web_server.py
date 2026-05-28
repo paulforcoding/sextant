@@ -519,7 +519,13 @@ def api_mailbox():
 @app.route("/")
 def index():
     if _TEMPLATE.exists():
-        return render_template_string(_TEMPLATE.read_text(encoding="utf-8"))
+        resp = app.make_response(
+            render_template_string(_TEMPLATE.read_text(encoding="utf-8"))
+        )
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
     return "<h1>index.html not found</h1>", 500
 
 
