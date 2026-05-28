@@ -199,6 +199,18 @@ def api_history(project_id: str):
     return jsonify(messages[-200:])
 
 
+@app.route("/api/chat/<project_id>/pending")
+def api_pending(project_id: str):
+    """Return pending mailbox messages for a project."""
+    if not _ready.is_set() or not _mgr:
+        return jsonify([])
+    try:
+        pending = _mgr.mailbox.get_pending(to=project_id)
+    except Exception:
+        pending = []
+    return jsonify(pending)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Slash commands
 # ═══════════════════════════════════════════════════════════════════════════
@@ -676,7 +688,9 @@ def _extract_text(content: Any) -> str:
 
 
 def _workspace_slug(project_dir: str) -> str:
-    return "-" + str(Path(project_dir).expanduser().resolve()).replace("/", "-")
+    # str(Path("/foo/bar").resolve()) → "/foo/bar"
+    # replace '/' with '-' → "-foo-bar"  (double-dash if we prepend another)
+    return str(Path(project_dir).expanduser().resolve()).replace("/", "-")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

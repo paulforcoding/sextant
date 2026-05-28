@@ -63,45 +63,37 @@ class Mailbox:
     def get_pending(self, to: str) -> list[dict]:
         """Return pending (undelivered) messages for a project, oldest first."""
         results: list[dict] = []
-        file = self._today_file()
-        if not file.exists():
-            return results
-
-        with open(file) as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if (
-                    entry.get("to") == to
-                    and entry.get("status") == "pending"
-                    and entry.get("msg_id") not in self._delivered
-                ):
-                    results.append(entry)
-
+        for file in self._all_readable_files():
+            with open(file) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        entry.get("to") == to
+                        and entry.get("status") == "pending"
+                        and entry.get("msg_id") not in self._delivered
+                    ):
+                        results.append(entry)
         return results
 
     def get_pending_count(self, to: str) -> int:
         """Return count of pending messages without loading all content."""
         count = 0
-        file = self._today_file()
-        if not file.exists():
-            return 0
-
-        with open(file) as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if (
-                    entry.get("to") == to
-                    and entry.get("status") == "pending"
-                    and entry.get("msg_id") not in self._delivered
-                ):
-                    count += 1
-
+        for file in self._all_readable_files():
+            with open(file) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        entry.get("to") == to
+                        and entry.get("status") == "pending"
+                        and entry.get("msg_id") not in self._delivered
+                    ):
+                        count += 1
         return count
 
     def mark_delivered(self, msg_ids: list[str]) -> None:
@@ -115,19 +107,16 @@ class Mailbox:
     ) -> list[dict]:
         """Return recent entries, newest first. For CLI `sextant mailbox`."""
         results: list[dict] = []
-        file = self._today_file()
-        if not file.exists():
-            return results
-
-        with open(file) as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if project and entry.get("from") != project and entry.get("to") != project:
-                    continue
-                results.append(entry)
+        for file in self._all_readable_files():
+            with open(file) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if project and entry.get("from") != project and entry.get("to") != project:
+                        continue
+                    results.append(entry)
 
         return results[-limit:][::-1]  # newest first
 
@@ -139,26 +128,29 @@ class Mailbox:
             reverse=True,
         )
 
+    def _all_readable_files(self) -> list[Path]:
+        """Return all existing JSONL files sorted oldest-first for chronological iteration."""
+        return sorted(
+            self._base.glob("*.jsonl"),
+            key=lambda p: p.name,
+        )
+
     def all_pending_counts(self) -> dict[str, int]:
-        """Return {project_id: pending_count} for all projects with pending messages today."""
+        """Return {project_id: pending_count} for all projects with pending messages."""
         counts: dict[str, int] = {}
-        file = self._today_file()
-        if not file.exists():
-            return counts
-
-        with open(file) as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if (
-                    entry.get("status") == "pending"
-                    and entry.get("msg_id") not in self._delivered
-                ):
-                    to = entry.get("to", "?")
-                    counts[to] = counts.get(to, 0) + 1
-
+        for file in self._all_readable_files():
+            with open(file) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        entry.get("status") == "pending"
+                        and entry.get("msg_id") not in self._delivered
+                    ):
+                        to = entry.get("to", "?")
+                        counts[to] = counts.get(to, 0) + 1
         return counts
 
     # -- helpers -----------------------------------------------------
