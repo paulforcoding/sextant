@@ -330,3 +330,182 @@ if __name__ == "__main__":
         sys.exit(exit_code)
     except SystemExit:
         raise
+
+# ------------------------------------------------------------------
+# Mailbox edge cases
+# ------------------------------------------------------------------
+
+
+class TestMailboxEdgeCases:
+    """Mailbox: JSONDecodeError handling, empty operations, corrupted files."""
+
+    def test_empty_mark_delivered_noop(self):
+        from sextant.mailbox import Mailbox
+        tmp = Path(tempfile.mkdtemp(prefix="sextant-test-"))
+        mbox = Mailbox(base_dir=tmp / "mailbox")
+        # Should not raise
+        mbox.mark_delivered([])
+        mbox.mark_delivered(None)
+
+    def test_get_pending_skips_corrupted_json_lines(self):
+        from sextant.mailbox import Mailbox
+        tmp = Path(tempfile.mkdtemp(prefix="sextant-test-"))
+        mbox = Mailbox(base_dir=tmp / "mailbox")
+
+        # Write a valid message
+        mbox.record(from_id="acp", to="ncp", subject="good", body="valid")
+
+        # Append a corrupted line directly
+        with open(mbox._today_file(), "a") as f:
+            f.write("{broken json!!!\n")
+
+        # Write another valid message
+        mbox.record(from_id="xcp", to="ncp", subject="also good", body="ok")
+
+        pending = mbox.get_pending(to="ncp")
+        assert len(pending) == 2  # corrupted line skipped
+        subjects = [m["subject"] for m in pending]
+        assert "good" in subjects
+        assert "also good" in subjects
+
+    def test_get_pending_count_skips_corrupted_lines(self):
+        from sextant.mailbox import Mailbox
+        tmp = Path(tempfile.mkdtemp(prefix="sextant-test-"))
+        mbox = Mailbox(base_dir=tmp / "mailbox")
+
+        mbox.record(from_id="acp", to="ncp", subject="a", body="1")
+        with open(mbox._today_file(), "a") as f:
+            f.write("{corrupted\n")
+        mbox.record(from_id="acp", to="ncp", subject="b", body="2")
+
+        assert mbox.get_pending_count(to="ncp") == 2
+
+    def test_query_skips_corrupted_lines(self):
+        from sextant.mailbox import Mailbox
+        tmp = Path(tempfile.mkdtemp(prefix="sextant-test-"))
+        mbox = Mailbox(base_dir=tmp / "mailbox")
+
+        mbox.record(from_id="acp", to="ncp", subject="a", body="1")
+        with open(mbox._today_file(), "a") as f:
+            f.write("{bad\n")
+        mbox.record(from_id="ncp", to="xcp", subject="b", body="2")
+
+        entries = mbox.query()
+        assert len(entries) == 2
+
+    def test_all_pending_counts_skips_corrupted_lines(self):
+        from sextant.mailbox import Mailbox
+        tmp = Path(tempfile.mkdtemp(prefix="sextant-test-"))
+        mbox = Mailbox(base_dir=tmp / "mailbox")
+
+        mbox.record(from_id="acp", to="ncp", subject="a", body="1")
+        with open(mbox._today_file(), "a") as f:
+            f.write("{bad\n")
+
+        counts = mbox.all_pending_counts()
+        assert counts == {"ncp": 1}
+
+    def test_mark_delivered_preserves_corrupted_lines(self):
+        from sextant.mailbox import Mailbox
+        tmp = Path(tempfile.mkdtemp(prefix="sextant-test-"))
+        mbox = Mailbox(base_dir=tmp / "mailbox")
+
+        msg_id = mbox.record(from_id="acp", to="ncp", subject="deliver me", body="x")
+        with open(mbox._today_file(), "a") as f:
+            f.write("{corrupted\n")
+
+        mbox.mark_delivered([msg_id])
+        assert mbox.get_pending(to="ncp") == []
+
+        # Verify corrupted line survived the rewrite
+        with open(mbox._today_file()) as f:
+            content = f.read()
+        assert "{corrupted" in content
+
+    def test_all_files_sorted_newest_first(self):
+        from sextant.mailbox import Mailbox
+        tmp = Path(tempfile.mkdtemp(prefix="sextant-test-"))
+        mbox = Mailbox(base_dir=tmp / "mailbox")
+
+        mbox.record(from_id="acp", to="ncp", subject="test", body="ok")
+        files = mbox.all_files()
+        assert len(files) >= 1
+        # all_files is sorted reverse by name (newest first)
+        names = [f.name for f in files]
+        assert names == sorted(names, reverse=True)
+
+    def test_mark_delivered_persists_to_jsonl(self):
+        """mark_delivered writes status to JSONL so it survives restarts."""
+        from sextant.mailbox import Mailbox
+        tmp = Path(tempfile.mkdtemp(prefix="sextant-test-"))
+        mbox = Mailbox(base_dir=tmp / "mailbox")
+
+        msg_id = mbox.record(from_id="acp", to="ncp", subject="persist", body="test")
+
+        # Mark delivered
+        mbox.mark_delivered([msg_id])
+
+        # Verify on-disk status
+        with open(mbox._today_file()) as f:
+            content = f.read()
+        assert '"status": "delivered"' in content
+
+        # Create a new Mailbox instance (simulate restart)
+        mbox2 = Mailbox(base_dir=tmp / "mailbox")
+        assert mbox2.get_pending(to="ncp") == []
+
+
+# ------------------------------------------------------------------
+# send_message error branch tests
+# ------------------------------------------------------------------
+
+
+class TestSendMessageErrors:
+    """send_message: error branches for uninitialized state."""
+
+    @pytest.mark.asyncio
+    async def test_manager_none_returns_error(self):
+        from sextant.send_message import send_message_handler, set_manager
+
+        set_manager(None)
+        fn = send_message_handler.handler
+        result = await fn({
+            "to": "ncp", "subject": "test", "body": "hello",
+        })
+        assert result["status"] == "error"
+        assert "SessionManager" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_current_project_none_returns_error(self):
+        from sextant.send_message import send_message_handler, set_manager
+        from types import SimpleNamespace
+
+        mgr = SimpleNamespace()
+        mgr.current_project = None
+        mgr.project_ids = ["ncp"]
+        set_manager(mgr)
+
+        fn = send_message_handler.handler
+        result = await fn({
+            "to": "ncp", "subject": "test", "body": "hello",
+        })
+        assert result["status"] == "error"
+        assert "current_project" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_mailbox_none_returns_error(self):
+        from sextant.send_message import send_message_handler, set_manager, set_mailbox
+        from types import SimpleNamespace
+
+        mgr = SimpleNamespace()
+        mgr.current_project = "acp"
+        mgr.project_ids = ["acp", "ncp"]
+        set_manager(mgr)
+        set_mailbox(None)
+
+        fn = send_message_handler.handler
+        result = await fn({
+            "to": "ncp", "subject": "test", "body": "hello",
+        })
+        assert result["status"] == "error"
+        assert "Mailbox" in result["message"]
