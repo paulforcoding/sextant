@@ -107,8 +107,7 @@ def _cmd_mailbox(args) -> None:
     for e in entries:
         ts = e["timestamp"].replace("T", " ").split("+")[0].split(".")[0]
         direction = f"{e['from']} → {e['to']}"
-        dur = f"{e['elapsed_ms']}ms" if e.get("elapsed_ms") else "—"
-        print(f"{ts}  {direction:20s}  {dur:>8s}  {e['subject']}")
+        print(f"{ts}  {direction:20s}  {e['subject']}")
 
 
 def _cmd_status(args) -> None:

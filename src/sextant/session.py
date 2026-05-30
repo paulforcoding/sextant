@@ -20,7 +20,6 @@ from claude_agent_sdk import (
     create_sdk_mcp_server,
 )
 from claude_agent_sdk.types import (
-    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     ToolPermissionContext,
@@ -141,9 +140,6 @@ class SessionManager:
                 return PermissionResultAllow(updated_input=input_data)
             return PermissionResultDeny(message=f"用户拒绝了 {tool_name}")
 
-        async def dummy_hook(input_data, tool_use_id, context):
-            return {"continue_": True}
-
         # 2. Create one SDK client per project
         for project in self._config.projects:
             opts = ClaudeAgentOptions(
@@ -155,7 +151,6 @@ class SessionManager:
                 env=_load_claude_env(),
                 mcp_servers={"sextant": mcp_server},
                 can_use_tool=can_use_tool,
-                hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[dummy_hook])]},
                 system_prompt={
                     "type": "preset",
                     "preset": "claude_code",

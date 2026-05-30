@@ -63,38 +63,26 @@ class Mailbox:
     def get_pending(self, to: str) -> list[dict]:
         """Return pending (undelivered) messages for a project, oldest first."""
         results: list[dict] = []
-        for file in self._all_readable_files():
-            with open(file) as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if (
-                        entry.get("to") == to
-                        and entry.get("status") == "pending"
-                        and entry.get("msg_id") not in self._delivered
-                    ):
-                        results.append(entry)
+        for entry in self._iter_entries():
+            if (
+                entry.get("to") == to
+                and entry.get("status") == "pending"
+                and entry.get("msg_id") not in self._delivered
+            ):
+                results.append(entry)
         return results
 
     def get_pending_count(self, to: str) -> int:
         """Return count of pending messages without loading all content."""
-        count = 0
-        for file in self._all_readable_files():
-            with open(file) as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if (
-                        entry.get("to") == to
-                        and entry.get("status") == "pending"
-                        and entry.get("msg_id") not in self._delivered
-                    ):
-                        count += 1
-        return count
+        return sum(
+            1
+            for entry in self._iter_entries()
+            if (
+                entry.get("to") == to
+                and entry.get("status") == "pending"
+                and entry.get("msg_id") not in self._delivered
+            )
+        )
 
     def mark_delivered(self, msg_ids: list[str]) -> None:
         """Mark messages as delivered — persists status to JSONL files.
@@ -138,16 +126,10 @@ class Mailbox:
     ) -> list[dict]:
         """Return recent entries, newest first. For CLI `sextant mailbox`."""
         results: list[dict] = []
-        for file in self._all_readable_files():
-            with open(file) as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if project and entry.get("from") != project and entry.get("to") != project:
-                        continue
-                    results.append(entry)
+        for entry in self._iter_entries():
+            if project and entry.get("from") != project and entry.get("to") != project:
+                continue
+            results.append(entry)
 
         return results[-limit:][::-1]  # newest first
 
@@ -166,22 +148,31 @@ class Mailbox:
             key=lambda p: p.name,
         )
 
-    def all_pending_counts(self) -> dict[str, int]:
-        """Return {project_id: pending_count} for all projects with pending messages."""
-        counts: dict[str, int] = {}
+    def _iter_entries(self):
+        """Yield all parsed entries from all JSONL files, oldest first.
+        
+        Skips lines that fail JSON decode.  Four read-only methods
+        (get_pending, get_pending_count, query, all_pending_counts)
+        share this generator to avoid repeated file-I/O-inner-loop code.
+        """
         for file in self._all_readable_files():
             with open(file) as f:
                 for line in f:
                     try:
-                        entry = json.loads(line)
+                        yield json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if (
-                        entry.get("status") == "pending"
-                        and entry.get("msg_id") not in self._delivered
-                    ):
-                        to = entry.get("to", "?")
-                        counts[to] = counts.get(to, 0) + 1
+
+    def all_pending_counts(self) -> dict[str, int]:
+        """Return {project_id: pending_count} for all projects with pending messages."""
+        counts: dict[str, int] = {}
+        for entry in self._iter_entries():
+            if (
+                entry.get("status") == "pending"
+                and entry.get("msg_id") not in self._delivered
+            ):
+                to = entry.get("to", "?")
+                counts[to] = counts.get(to, 0) + 1
         return counts
 
     # -- helpers -----------------------------------------------------
