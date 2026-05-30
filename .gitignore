@@ -18,3 +18,8 @@ uv.lock
 # IDE
 .vscode/
 .idea/
+.planning/
+
+# Coverage reports
+.coverage
+coverage.json

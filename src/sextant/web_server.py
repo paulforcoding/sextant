@@ -29,7 +29,7 @@ _TEMPLATE = _HERE / "web" / "templates" / "index.html"
 # Globals
 # ---------------------------------------------------------------------------
 
-app = Flask(__name__, template_folder=str(_HERE / "web" / "templates"))
+app = Flask(__name__, template_folder=str(_HERE / "web" / "templates"), static_folder=str(_HERE / "web" / "static"), static_url_path="/static")
 
 _mgr: Any = None           # SessionManager — None until agents are ready
 _streams: dict[str, "queue.Queue[dict]"] = {}
@@ -197,6 +197,30 @@ def api_history(project_id: str):
         return jsonify({"error": str(e)}), 500
 
     return jsonify(messages[-200:])
+
+
+@app.route("/api/chat/<project_id>/pending")
+def api_pending(project_id: str):
+    """Return pending mailbox messages for a project."""
+    if not _ready.is_set() or not _mgr:
+        return jsonify([])
+    try:
+        pending = _mgr.mailbox.get_pending(to=project_id)
+    except Exception:
+        pending = []
+    return jsonify(pending)
+
+
+@app.route("/api/chat/<project_id>/consume-pending", methods=["POST"])
+def api_consume_pending(project_id: str):
+    """Mark specific mailbox messages as delivered so they won't reappear."""
+    if not _ready.is_set() or not _mgr:
+        return jsonify({"status": "not_ready"}), 503
+    data = request.get_json(silent=True) or {}
+    msg_ids = data.get("msg_ids", [])
+    if msg_ids:
+        _mgr.mailbox.mark_delivered(msg_ids)
+    return jsonify({"status": "ok", "consumed": len(msg_ids)})
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -495,7 +519,13 @@ def api_mailbox():
 @app.route("/")
 def index():
     if _TEMPLATE.exists():
-        return render_template_string(_TEMPLATE.read_text(encoding="utf-8"))
+        resp = app.make_response(
+            render_template_string(_TEMPLATE.read_text(encoding="utf-8"))
+        )
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
     return "<h1>index.html not found</h1>", 500
 
 
@@ -552,15 +582,26 @@ async def _agent_query_reuse_client(project_id: str, prompt: str, q: queue.Queue
         t0 = time.time()
         await client.query(full_prompt)
 
+        # Track streaming counts: "text" and "thinking" keys record how
+        # many characters have been sent via StreamEvent deltas, so we can
+        # skip the complete block from AssistantMessage to avoid duplication.
+        streamed_counts: dict[str, int] = {}
+
         async for msg in client.receive_response():
-            _serialize_and_push(msg, q)
+            _serialize_and_push(msg, q, streamed_counts)
 
         elapsed = time.time() - t0
         q.put({"type": "done", "elapsed": round(elapsed, 1)})
 
 
 def _build_full_prompt(project_id: str, user_prompt: str) -> str:
-    """Prepend pending mailbox messages if any."""
+    """Prepend pending mailbox messages if not already in the user prompt.
+
+    When the web UI pre-fills the textarea with formatted pending messages,
+    we detect this by checking whether the prompt starts with the same
+    formatted block.  If it does we skip the prepend to avoid duplication
+    but still mark the messages as delivered.
+    """
     try:
         if _mgr:
             pending = _mgr.mailbox.get_pending(to=project_id)
@@ -568,28 +609,48 @@ def _build_full_prompt(project_id: str, user_prompt: str) -> str:
                 msgs = []
                 for m in pending:
                     msgs.append(f"[来自 {m['from']}] {m['subject']}\n\n{m['body']}")
+                formatted = "\n\n".join(msgs)
                 _mgr.mark_mailbox_delivered(project_id)
-                return "\n\n".join(msgs) + f"\n\n---\n\n{user_prompt}"
+                # If the textarea was pre-filled, don't double-include
+                if user_prompt.startswith(formatted):
+                    return user_prompt
+                return formatted + f"\n\n---\n\n{user_prompt}"
     except Exception:
         pass
     return user_prompt
 
 
-def _serialize_and_push(msg: Any, q: queue.Queue) -> None:
-    """Convert an SDK message to JSON and push to SSE queue."""
+def _serialize_and_push(msg: Any, q: queue.Queue, streamed_counts: dict[str, int]) -> None:
+    """Convert an SDK message to JSON and push to SSE queue.
+
+    *streamed_counts* tracks how many characters of text/thinking have been
+    sent via StreamEvent deltas.  When a complete block arrives from
+    AssistantMessage we skip it if deltas already covered it (keyed by
+    the block text hash for a rough dedup check).
+    """
     from claude_agent_sdk import (
-        AssistantMessage, ResultMessage,
+        AssistantMessage, ResultMessage, StreamEvent,
         TextBlock, ThinkingBlock,
         ToolUseBlock, ToolResultBlock,
         ServerToolUseBlock, ServerToolResultBlock,
     )
 
-    if isinstance(msg, AssistantMessage):
+    if isinstance(msg, StreamEvent):
+        _handle_stream_event(msg, q, streamed_counts)
+
+    elif isinstance(msg, AssistantMessage):
         for block in msg.content:
             if isinstance(block, ThinkingBlock):
-                q.put({"type": "thinking", "content": block.thinking.strip()})
+                thinking = block.thinking.strip()
+                if thinking and streamed_counts.get("thinking", 0) == 0:
+                    q.put({"type": "thinking", "content": thinking})
+                streamed_counts["thinking"] = 0
             elif isinstance(block, TextBlock) and block.text:
-                q.put({"type": "text", "content": block.text})
+                # If deltas already sent this text character-by-character,
+                # skip the complete block to avoid duplication.
+                if streamed_counts.get("text", 0) == 0:
+                    q.put({"type": "text", "content": block.text})
+                streamed_counts["text"] = 0
             elif isinstance(block, ToolUseBlock):
                 q.put({"type": "tool_use", "name": block.name,
                        "input": _safe_dict(block.input)})
@@ -624,6 +685,40 @@ def _serialize_and_push(msg: Any, q: queue.Queue) -> None:
         q.put({"type": "done",
                "cost": msg.total_cost_usd,
                "stop_reason": msg.stop_reason})
+
+
+def _handle_stream_event(msg: Any, q: queue.Queue, counts: dict[str, int]) -> None:
+    """Extract text/thinking deltas from a raw Anthropic API StreamEvent."""
+    event = msg.event
+    if not isinstance(event, dict):
+        return
+    etype = event.get("type", "")
+
+    if etype == "content_block_delta":
+        delta = event.get("delta", {})
+        if not isinstance(delta, dict):
+            return
+        dtype = delta.get("type", "")
+        if dtype == "text_delta":
+            text = delta.get("text", "")
+            if text:
+                counts["text"] = counts.get("text", 0) + len(text)
+                q.put({"type": "text", "content": text})
+        elif dtype == "thinking_delta":
+            thinking = delta.get("thinking", "")
+            if thinking:
+                counts["thinking"] = counts.get("thinking", 0) + len(thinking)
+                q.put({"type": "thinking", "content": thinking})
+
+    elif etype == "content_block_start":
+        block = event.get("content_block", {})
+        if isinstance(block, dict) and block.get("type") == "text":
+            counts["text"] = 0
+        elif isinstance(block, dict) and block.get("type") == "thinking":
+            counts["thinking"] = 0
+        elif isinstance(block, dict) and block.get("type") == "tool_use":
+            q.put({"type": "tool_use", "name": block.get("name", ""),
+                   "input": block.get("input", {})})
 
 
 def _safe_dict(obj: Any) -> dict:
@@ -676,7 +771,9 @@ def _extract_text(content: Any) -> str:
 
 
 def _workspace_slug(project_dir: str) -> str:
-    return "-" + str(Path(project_dir).expanduser().resolve()).replace("/", "-")
+    # str(Path("/foo/bar").resolve()) → "/foo/bar"
+    # replace '/' with '-' → "-foo-bar"  (double-dash if we prepend another)
+    return str(Path(project_dir).expanduser().resolve()).replace("/", "-")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

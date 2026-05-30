@@ -456,183 +456,249 @@ async def _handle_context(mgr: SessionManager, cur_project: str, show_all: bool 
 
 
 # ------------------------------------------------------------------
-# Command handler
 # ------------------------------------------------------------------
+# Command handlers (extracted from _handle_command)
+# ------------------------------------------------------------------
+
+async def _cmd_help(mgr, config, cur_project, parts):
+    """Handle /help command."""
+    print("命令:")
+    print("  /help          — 显示帮助")
+    print("  /chat <项目>   — 切换到指定项目（显示待处理消息）")
+    print("  /context [all] — 上下文窗口用量")
+    print("  /usage         — 费用/用量统计")
+    print("  /rename [标题] — 重命名当前会话")
+    print("  /compact [焦点] — 压缩对话历史以释放上下文")
+    print("  /plan          — 进入 Plan 模式（只读分析）")
+    print("  /fork          — 分支当前会话到新会话")
+    print("  /skills        — 列出可用技能")
+    print("  /info          — 显示当前 session 信息")
+    print("  /perm <模式>   — 切换权限模式 (default|acceptEdits|plan)")
+    print("  /model <名称>  — 切换模型")
+    print("  /status        — 显示各项目 mailbox 状态")
+    print("  /exit          — 退出")
+    print("  /clear         — 清屏")
+
+
+async def _cmd_context(mgr, config, cur_project, parts):
+    """Handle /context [all] command."""
+    show_all = len(parts) > 1 and parts[1] == "all"
+    await _handle_context(mgr, cur_project, show_all=show_all)
+
+
+async def _cmd_usage(mgr, config, cur_project, parts):
+    """Handle /usage or /cost command."""
+    total = mgr._total_costs.get(cur_project, 0.0)
+    last = mgr._last_costs.get(cur_project)
+    print(f"\n  项目: {cur_project}")
+    print(f"  累计费用: ${total:.4f}")
+    if last is not None:
+        print(f"  最近调用: ${last:.4f}")
+    if not total and last is None:
+        print("  (尚无费用数据，请先发起对话)")
+    # Also show context snapshot
+    try:
+        usage = await mgr.get_client(cur_project).get_context_usage()
+        bar = _progress_bar(usage.get("percentage", 0))
+        print(f"  上下文: {bar} {usage['percentage']:.0f}%  "
+              f"{usage['totalTokens']:,d} / {usage['maxTokens']:,d} tokens")
+    except Exception:
+        pass
+
+
+async def _cmd_rename(mgr, config, cur_project, parts):
+    """Handle /rename [标题] command."""
+    sid = mgr._session_ids.get(cur_project)
+    if not sid:
+        print("错误：未捕获到 session_id。请先发起一次对话。")
+        return None
+    if len(parts) > 1:
+        title = " ".join(parts[1:])
+    else:
+        print("新标题: ", end="", flush=True)
+        loop = asyncio.get_running_loop()
+        try:
+            title = (await loop.run_in_executor(None, input)).strip()
+        except EOFError:
+            return None
+    if not title:
+        return None
+    try:
+        proj = config.get_project(cur_project)
+        rename_session(sid, title, directory=str(proj.directory))
+        print(f"会话重命名 → {title}")
+    except Exception as e:
+        print(f"重命名失败: {e}")
+
+
+async def _cmd_compact(mgr, config, cur_project, parts):
+    """Handle /compact [焦点] command — pass-through to agent."""
+    instructions = " ".join(parts[1:]) if len(parts) > 1 else None
+    prompt = f"/compact {instructions}" if instructions else "/compact"
+    print(f"压缩中{'（焦点: ' + instructions + '）' if instructions else ''}…", flush=True)
+    try:
+        async for msg in mgr.query(cur_project, prompt):
+            _display_message(msg, mgr, cur_project)
+    except Exception as e:
+        print(f"\n[错误] {e}", file=sys.stderr)
+    print("✓ 压缩完成。用 /context 查看新占比。")
+
+
+async def _cmd_plan(mgr, config, cur_project, parts):
+    """Handle /plan command — enter Plan mode."""
+    client = mgr.get_client(cur_project)
+    await client.set_permission_mode("plan")
+    print("进入 Plan 模式 — Agent 只读分析，不修改文件。")
+    print("用 /perm default 或 /perm acceptEdits 退出。")
+
+
+async def _cmd_fork(mgr, config, cur_project, parts):
+    """Handle /fork or /branch command."""
+    sid = mgr._session_ids.get(cur_project)
+    if not sid:
+        print("错误：未捕获到 session_id。请先发起一次对话。")
+        return None
+    proj = config.get_project(cur_project)
+    try:
+        result = fork_session(sid, directory=str(proj.directory))
+        print(f"会话已分支。")
+        print(f"  原会话: {sid}")
+        print(f"  新会话: {result.session_id}")
+        print(f"用 `sextant chat {cur_project} --resume {result.session_id}` 进入新会话。")
+    except Exception as e:
+        print(f"分支失败: {e}")
+
+
+async def _cmd_skills(mgr, config, cur_project, parts):
+    """Handle /skills command — pass-through to agent."""
+    try:
+        async for msg in mgr.query(cur_project, "/skills"):
+            _display_message(msg, mgr, cur_project)
+    except Exception as e:
+        print(f"\n[错误] {e}", file=sys.stderr)
+
+
+async def _cmd_chat(mgr, config, cur_project, parts):
+    """Handle /chat <项目> command — switch active project."""
+    if len(parts) < 2:
+        print("用法: /chat <项目ID>")
+        print(f"可用项目: {', '.join(mgr.project_ids)}")
+        return None
+    target = parts[1]
+    result = await _do_chat_switch(target, mgr, config, cur_project)
+    if result is None:
+        return None
+    # Now read user input for the draft
+    prompt = await _handle_chat_draft_input(mgr, target)
+    if prompt:
+        # Send the prompt to the agent
+        print()  # newline after input
+        try:
+            async for msg in mgr.query(target, prompt):
+                _display_message(msg, mgr, target)
+        except Exception as e:
+            print(f"\n[错误] {e}", file=sys.stderr)
+    return target  # switched successfully
+
+
+async def _cmd_perm(mgr, config, cur_project, parts):
+    """Handle /perm <模式> command."""
+    mode = parts[1] if len(parts) > 1 else None
+    valid = {"default", "acceptEdits", "plan"}
+    if mode not in valid:
+        print(f"用法: /perm {{{'|'.join(valid)}}}")
+        return None
+    client = mgr.get_client(cur_project)
+    await client.set_permission_mode(mode)
+    print(f"权限模式 → {mode}")
+
+
+async def _cmd_model(mgr, config, cur_project, parts):
+    """Handle /model <名称> command."""
+    model_name = parts[1] if len(parts) > 1 else None
+    if not model_name:
+        print("用法: /model <名称>")
+        return None
+    client = mgr.get_client(cur_project)
+    await client.set_model(model_name)
+    print(f"模型 → {model_name}")
+
+
+async def _cmd_info(mgr, config, cur_project, parts):
+    """Handle /info command."""
+    try:
+        client = mgr.get_client(cur_project)
+        info = await client.get_server_info()
+        print(f"project:  {cur_project}")
+        print(f"pid:      {info.get('pid', '?')}")
+        print(f"cwd:      {client.options.cwd}")
+    except Exception as e:
+        print(f"(无法获取 session 信息: {e})")
+
+
+async def _cmd_status(mgr, config, cur_project, parts):
+    """Handle /status command — show mailbox pending counts."""
+    try:
+        counts = mgr.mailbox.all_pending_counts()
+        if not counts:
+            print("所有项目均无待处理消息。")
+        else:
+            print(f"{'项目':<12s} {'待处理':>6s}")
+            print("-" * 20)
+            for pid, count in sorted(counts.items()):
+                marker = " ← 当前" if pid == cur_project else ""
+                print(f"{pid:<12s} {count:>6d}{marker}")
+    except Exception as e:
+        print(f"(无法读取 mailbox: {e})")
+
+
+def _cmd_clear(mgr, config, cur_project, parts):
+    """Handle /clear command."""
+    print("\033[2J\033[H", end="")
+
+
+def _cmd_exit(mgr, config, cur_project, parts):
+    """Handle /exit command."""
+    return "exit"
+
+
+# Command routing table: command → handler
+_CMD_ROUTES: dict[str, callable] = {
+    "/help": _cmd_help,
+    "/context": _cmd_context,
+    "/usage": _cmd_usage,
+    "/cost": _cmd_usage,
+    "/rename": _cmd_rename,
+    "/compact": _cmd_compact,
+    "/plan": _cmd_plan,
+    "/fork": _cmd_fork,
+    "/branch": _cmd_fork,
+    "/skills": _cmd_skills,
+    "/chat": _cmd_chat,
+    "/perm": _cmd_perm,
+    "/model": _cmd_model,
+    "/info": _cmd_info,
+    "/status": _cmd_status,
+    "/clear": _cmd_clear,
+    "/exit": _cmd_exit,
+}
+
 
 async def _handle_command(
     cmd: str, mgr: SessionManager, config: "SextantConfig", cur_project: str
 ) -> str | None:
-    """Handle a slash command.  Returns:
+    """Handle a slash command via routing table.  Returns:
     - "exit" to quit
     - new project_id if project was switched
     - None otherwise
     """
     parts = cmd.strip().split()
     command = parts[0].lower()
-
-    if command == "/help":
-        print("命令:")
-        print("  /help          — 显示帮助")
-        print("  /chat <项目>   — 切换到指定项目（显示待处理消息）")
-        print("  /context [all] — 上下文窗口用量")
-        print("  /usage         — 费用/用量统计")
-        print("  /rename [标题] — 重命名当前会话")
-        print("  /compact [焦点] — 压缩对话历史以释放上下文")
-        print("  /plan          — 进入 Plan 模式（只读分析）")
-        print("  /fork          — 分支当前会话到新会话")
-        print("  /skills        — 列出可用技能")
-        print("  /info          — 显示当前 session 信息")
-        print("  /perm <模式>   — 切换权限模式 (default|acceptEdits|plan)")
-        print("  /model <名称>  — 切换模型")
-        print("  /status        — 显示各项目 mailbox 状态")
-        print("  /exit          — 退出")
-        print("  /clear         — 清屏")
-    elif command == "/context":
-        show_all = len(parts) > 1 and parts[1] == "all"
-        await _handle_context(mgr, cur_project, show_all=show_all)
-    elif command in ("/usage", "/cost"):
-        total = mgr._total_costs.get(cur_project, 0.0)
-        last = mgr._last_costs.get(cur_project)
-        print(f"\n  项目: {cur_project}")
-        print(f"  累计费用: ${total:.4f}")
-        if last is not None:
-            print(f"  最近调用: ${last:.4f}")
-        if not total and last is None:
-            print("  (尚无费用数据，请先发起对话)")
-        # Also show context snapshot
-        try:
-            usage = await mgr.get_client(cur_project).get_context_usage()
-            bar = _progress_bar(usage.get("percentage", 0))
-            print(f"  上下文: {bar} {usage['percentage']:.0f}%  "
-                  f"{usage['totalTokens']:,d} / {usage['maxTokens']:,d} tokens")
-        except Exception:
-            pass
-    elif command == "/rename":
-        sid = mgr._session_ids.get(cur_project)
-        if not sid:
-            print("错误：未捕获到 session_id。请先发起一次对话。")
-            return None
-        if len(parts) > 1:
-            title = " ".join(parts[1:])
+    handler = _CMD_ROUTES.get(command)
+    if handler is not None:
+        if asyncio.iscoroutinefunction(handler):
+            return await handler(mgr, config, cur_project, parts)
         else:
-            print("新标题: ", end="", flush=True)
-            loop = asyncio.get_running_loop()
-            try:
-                title = (await loop.run_in_executor(None, input)).strip()
-            except EOFError:
-                return None
-        if not title:
-            return None
-        try:
-            proj = config.get_project(cur_project)
-            rename_session(sid, title, directory=str(proj.directory))
-            print(f"会话重命名 → {title}")
-        except Exception as e:
-            print(f"重命名失败: {e}")
-    elif command == "/compact":
-        # Pass-through: CC CLI intercepts /compact as a built-in slash command.
-        # The SDK sends it as a user message; CC CLI handles it internally
-        # (generates summary, appends compact_boundary to JSONL).
-        instructions = " ".join(parts[1:]) if len(parts) > 1 else None
-        prompt = f"/compact {instructions}" if instructions else "/compact"
-        print(f"压缩中{'（焦点: ' + instructions + '）' if instructions else ''}…", flush=True)
-        try:
-            async for msg in mgr.query(cur_project, prompt):
-                _display_message(msg, mgr, cur_project)
-        except Exception as e:
-            print(f"\n[错误] {e}", file=sys.stderr)
-        print("✓ 压缩完成。用 /context 查看新占比。")
-    elif command in ("/plan",):
-        client = mgr.get_client(cur_project)
-        await client.set_permission_mode("plan")
-        print("进入 Plan 模式 — Agent 只读分析，不修改文件。")
-        print("用 /perm default 或 /perm acceptEdits 退出。")
-    elif command in ("/fork", "/branch"):
-        sid = mgr._session_ids.get(cur_project)
-        if not sid:
-            print("错误：未捕获到 session_id。请先发起一次对话。")
-            return None
-        proj = config.get_project(cur_project)
-        try:
-            result = fork_session(sid, directory=str(proj.directory))
-            print(f"会话已分支。")
-            print(f"  原会话: {sid}")
-            print(f"  新会话: {result.session_id}")
-            print(f"用 `sextant chat {cur_project} --resume {result.session_id}` 进入新会话。")
-        except Exception as e:
-            print(f"分支失败: {e}")
-    elif command == "/skills":
-        # Pass-through: CC CLI lists available skills (built-in + custom).
-        try:
-            async for msg in mgr.query(cur_project, "/skills"):
-                _display_message(msg, mgr, cur_project)
-        except Exception as e:
-            print(f"\n[错误] {e}", file=sys.stderr)
-    elif command == "/chat":
-        if len(parts) < 2:
-            print("用法: /chat <项目ID>")
-            print(f"可用项目: {', '.join(mgr.project_ids)}")
-            return None
-        target = parts[1]
-        result = await _do_chat_switch(target, mgr, config, cur_project)
-        if result is None:
-            return None
-        # Now read user input for the draft
-        prompt = await _handle_chat_draft_input(mgr, target)
-        if prompt:
-            # Send the prompt to the agent
-            print()  # newline after input
-            try:
-                async for msg in mgr.query(target, prompt):
-                    _display_message(msg, mgr, target)
-            except Exception as e:
-                print(f"\n[错误] {e}", file=sys.stderr)
-        return target  # switched successfully
-    elif command == "/perm":
-        mode = parts[1] if len(parts) > 1 else None
-        valid = {"default", "acceptEdits", "plan"}
-        if mode not in valid:
-            print(f"用法: /perm {{{'|'.join(valid)}}}")
-            return None
-        client = mgr.get_client(cur_project)
-        await client.set_permission_mode(mode)
-        print(f"权限模式 → {mode}")
-    elif command == "/model":
-        model_name = parts[1] if len(parts) > 1 else None
-        if not model_name:
-            print("用法: /model <名称>")
-            return None
-        client = mgr.get_client(cur_project)
-        await client.set_model(model_name)
-        print(f"模型 → {model_name}")
-    elif command == "/info":
-        try:
-            client = mgr.get_client(cur_project)
-            info = await client.get_server_info()
-            print(f"project:  {cur_project}")
-            print(f"pid:      {info.get('pid', '?')}")
-            print(f"cwd:      {client.options.cwd}")
-        except Exception as e:
-            print(f"(无法获取 session 信息: {e})")
-    elif command == "/status":
-        # Show mailbox pending counts for all projects
-        try:
-            counts = mgr.mailbox.all_pending_counts()
-            if not counts:
-                print("所有项目均无待处理消息。")
-            else:
-                print(f"{'项目':<12s} {'待处理':>6s}")
-                print("-" * 20)
-                for pid, count in sorted(counts.items()):
-                    marker = " ← 当前" if pid == cur_project else ""
-                    print(f"{pid:<12s} {count:>6d}{marker}")
-        except Exception as e:
-            print(f"(无法读取 mailbox: {e})")
-    elif command == "/clear":
-        print("\033[2J\033[H", end="")
-    elif command == "/exit":
-        return "exit"
-    else:
-        print(f"未知命令: {command}。输入 /help 查看可用命令。")
-
+            return handler(mgr, config, cur_project, parts)
+    print(f"未知命令: {command}。输入 /help 查看可用命令。")
     return None

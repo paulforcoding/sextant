@@ -29,8 +29,8 @@ class Mailbox:
             base_dir = Path.home() / ".sextant" / "mailbox"
         self._base = Path(base_dir)
         self._base.mkdir(parents=True, exist_ok=True)
-        # In-memory set of delivered msg_ids for this session.
-        # On restart, previously-delivered messages may show again — acceptable.
+        # In-memory cache of delivered msg_ids (also persisted to JSONL files).
+        # Serves as a fast check so we don't re-read files for every query.
         self._delivered: set[str] = set()
 
     # -- write -------------------------------------------------------
@@ -63,50 +63,61 @@ class Mailbox:
     def get_pending(self, to: str) -> list[dict]:
         """Return pending (undelivered) messages for a project, oldest first."""
         results: list[dict] = []
-        file = self._today_file()
-        if not file.exists():
-            return results
-
-        with open(file) as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if (
-                    entry.get("to") == to
-                    and entry.get("status") == "pending"
-                    and entry.get("msg_id") not in self._delivered
-                ):
-                    results.append(entry)
-
+        for entry in self._iter_entries():
+            if (
+                entry.get("to") == to
+                and entry.get("status") == "pending"
+                and entry.get("msg_id") not in self._delivered
+            ):
+                results.append(entry)
         return results
 
     def get_pending_count(self, to: str) -> int:
         """Return count of pending messages without loading all content."""
-        count = 0
-        file = self._today_file()
-        if not file.exists():
-            return 0
-
-        with open(file) as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if (
-                    entry.get("to") == to
-                    and entry.get("status") == "pending"
-                    and entry.get("msg_id") not in self._delivered
-                ):
-                    count += 1
-
-        return count
+        return sum(
+            1
+            for entry in self._iter_entries()
+            if (
+                entry.get("to") == to
+                and entry.get("status") == "pending"
+                and entry.get("msg_id") not in self._delivered
+            )
+        )
 
     def mark_delivered(self, msg_ids: list[str]) -> None:
-        """Mark messages as delivered (in-memory — survives only this session)."""
+        """Mark messages as delivered — persists status to JSONL files.
+
+        Rewrites affected JSONL lines so the status change survives
+        server restarts.  Uses atomic write-via-temp+rename.
+        """
+        if not msg_ids:
+            return
         self._delivered.update(msg_ids)
+        ids = set(msg_ids)
+
+        for file in self._all_readable_files():
+            modified = False
+            lines: list[str] = []
+            with open(file) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        lines.append(line)
+                        continue
+                    if (
+                        entry.get("msg_id") in ids
+                        and entry.get("status") == "pending"
+                    ):
+                        entry["status"] = "delivered"
+                        modified = True
+                    lines.append(json.dumps(entry, ensure_ascii=False) + "\n")
+
+            if modified:
+                tmp = file.with_suffix(file.suffix + ".tmp")
+                with open(tmp, "w") as f:
+                    f.writelines(lines)
+                tmp.replace(file)
 
     def query(
         self,
@@ -115,19 +126,10 @@ class Mailbox:
     ) -> list[dict]:
         """Return recent entries, newest first. For CLI `sextant mailbox`."""
         results: list[dict] = []
-        file = self._today_file()
-        if not file.exists():
-            return results
-
-        with open(file) as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if project and entry.get("from") != project and entry.get("to") != project:
-                    continue
-                results.append(entry)
+        for entry in self._iter_entries():
+            if project and entry.get("from") != project and entry.get("to") != project:
+                continue
+            results.append(entry)
 
         return results[-limit:][::-1]  # newest first
 
@@ -139,26 +141,38 @@ class Mailbox:
             reverse=True,
         )
 
+    def _all_readable_files(self) -> list[Path]:
+        """Return all existing JSONL files sorted oldest-first for chronological iteration."""
+        return sorted(
+            self._base.glob("*.jsonl"),
+            key=lambda p: p.name,
+        )
+
+    def _iter_entries(self):
+        """Yield all parsed entries from all JSONL files, oldest first.
+        
+        Skips lines that fail JSON decode.  Four read-only methods
+        (get_pending, get_pending_count, query, all_pending_counts)
+        share this generator to avoid repeated file-I/O-inner-loop code.
+        """
+        for file in self._all_readable_files():
+            with open(file) as f:
+                for line in f:
+                    try:
+                        yield json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
     def all_pending_counts(self) -> dict[str, int]:
-        """Return {project_id: pending_count} for all projects with pending messages today."""
+        """Return {project_id: pending_count} for all projects with pending messages."""
         counts: dict[str, int] = {}
-        file = self._today_file()
-        if not file.exists():
-            return counts
-
-        with open(file) as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if (
-                    entry.get("status") == "pending"
-                    and entry.get("msg_id") not in self._delivered
-                ):
-                    to = entry.get("to", "?")
-                    counts[to] = counts.get(to, 0) + 1
-
+        for entry in self._iter_entries():
+            if (
+                entry.get("status") == "pending"
+                and entry.get("msg_id") not in self._delivered
+            ):
+                to = entry.get("to", "?")
+                counts[to] = counts.get(to, 0) + 1
         return counts
 
     # -- helpers -----------------------------------------------------

@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 语言规则
+
+**无论用户输入是中文还是英文，所有输出都必须使用中文。** 包括但不限于：对话回复、代码注释、commit 消息、文档、报告。代码标识符（变量名、函数名、类名）保持英文。
+
 ## 项目定位
 
 sextant 让你在同一个终端 / Web UI 中同时管理多个 Claude Code 实例（每个项目目录一个），并使它们之间能通过 mailbox 机制互相发送消息。

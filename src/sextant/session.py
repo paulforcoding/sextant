@@ -20,7 +20,6 @@ from claude_agent_sdk import (
     create_sdk_mcp_server,
 )
 from claude_agent_sdk.types import (
-    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     ToolPermissionContext,
@@ -104,33 +103,36 @@ class SessionManager:
     # -- context manager -------------------------------------------
 
     async def __aenter__(self) -> "SessionManager":
-        # 1. Build the send_message tool (import deferred to break circular dep)
+        mcp_server = self._build_mcp_server()
+        can_use_tool = self._create_can_use_tool()
+        for project in self._config.projects:
+            client = await self._start_agent(project, mcp_server, can_use_tool)
+            self._clients[project.id] = client
+            print(f"  ✓ {project.id:12s} → {project.directory}", file=sys.stderr)
+        return self
+
+    def _build_mcp_server(self):
+        """Create the in-process MCP server with send_message tool."""
         from .send_message import send_message_tool, set_mailbox
 
-        mcp_server = create_sdk_mcp_server(
+        set_mailbox(self._mailbox)
+        return create_sdk_mcp_server(
             name="sextant",
             version="0.2.0",
             tools=[send_message_tool],
         )
 
-        # Wire the mailbox singleton
-        set_mailbox(self._mailbox)
-
-        # ── canUseTool: intercept ALL tool calls for user approval ──
+    def _create_can_use_tool(self):
+        """Return a can_use_tool callback that intercepts tool calls for user approval."""
         manager_ref = self  # closure capture
 
         async def can_use_tool(
             tool_name: str, input_data: dict, context: ToolPermissionContext
         ) -> PermissionResultAllow | PermissionResultDeny:
-            # Always allow our own MCP tool
             if tool_name == "send_message":
                 return PermissionResultAllow(updated_input=input_data)
-
-            # Handle CC asking the user questions
             if tool_name == "AskUserQuestion":
                 return await manager_ref._handle_ask_user_question(input_data)
-
-            # All other tools → ask user
             desc = _format_tool_for_user(tool_name, input_data)
             reply = await manager_ref._prompt_user(
                 from_id=manager_ref._current_project or "?",
@@ -141,34 +143,29 @@ class SessionManager:
                 return PermissionResultAllow(updated_input=input_data)
             return PermissionResultDeny(message=f"用户拒绝了 {tool_name}")
 
-        async def dummy_hook(input_data, tool_use_id, context):
-            return {"continue_": True}
+        return can_use_tool
 
-        # 2. Create one SDK client per project
-        for project in self._config.projects:
-            opts = ClaudeAgentOptions(
-                cwd=str(project.directory),
-                permission_mode=project.permission_mode or self._config.permission_mode or "default",
-                setting_sources=["project"],
-                continue_conversation=project.continue_conversation,
-                resume=project.session_id,
-                env=_load_claude_env(),
-                mcp_servers={"sextant": mcp_server},
-                can_use_tool=can_use_tool,
-                hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[dummy_hook])]},
-                system_prompt={
-                    "type": "preset",
-                    "preset": "claude_code",
-                    "append": _build_system_prompt(project.id, self._config.projects),
-                },
-                **(dict(allowed_tools=project.allowed_tools) if project.allowed_tools else {}),
-            )
-            client = ClaudeSDKClient(options=opts)
-            await client.__aenter__()
-            self._clients[project.id] = client
-            print(f"  ✓ {project.id:12s} → {project.directory}", file=sys.stderr)
-
-        return self
+    async def _start_agent(self, project, mcp_server, can_use_tool) -> ClaudeSDKClient:
+        """Create and enter a ClaudeSDKClient for a single project."""
+        opts = ClaudeAgentOptions(
+            cwd=str(project.directory),
+            permission_mode=project.permission_mode or self._config.permission_mode or "default",
+            setting_sources=["project"],
+            continue_conversation=project.continue_conversation,
+            resume=project.session_id,
+            env=_load_claude_env(),
+            mcp_servers={"sextant": mcp_server},
+            can_use_tool=can_use_tool,
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": _build_system_prompt(project.id, self._config.projects),
+            },
+            **(dict(allowed_tools=project.allowed_tools) if project.allowed_tools else {}),
+        )
+        client = ClaudeSDKClient(options=opts)
+        await client.__aenter__()
+        return client
 
     async def __aexit__(self, *args) -> None:
         errors: list[Exception] = []
