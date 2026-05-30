@@ -29,7 +29,7 @@ _TEMPLATE = _HERE / "web" / "templates" / "index.html"
 # Globals
 # ---------------------------------------------------------------------------
 
-app = Flask(__name__, template_folder=str(_HERE / "web" / "templates"))
+app = Flask(__name__, template_folder=str(_HERE / "web" / "templates"), static_folder=str(_HERE / "web" / "static"), static_url_path="/static")
 
 _mgr: Any = None           # SessionManager — None until agents are ready
 _streams: dict[str, "queue.Queue[dict]"] = {}
