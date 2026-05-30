@@ -226,6 +226,70 @@ async function refreshHistory(projectId) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// Slash command dispatcher
+// ══════════════════════════════════════════════════════════════
+async function dispatchSlashCommand(prompt) {
+  const spaceIdx = prompt.indexOf(' ');
+  const cmd = spaceIdx > 0 ? prompt.slice(0, spaceIdx) : prompt;
+
+  switch (cmd) {
+    case '/help':
+      handleHelp();
+      break;
+    case '/agents':
+      await handleAgents();
+      break;
+    case '/mcp':
+      await handleMcp();
+      break;
+    case '/context':
+      await handleContext(prompt);
+      break;
+    case '/usage':
+    case '/cost':
+      await handleUsage();
+      break;
+    case '/info':
+      await handleInfo();
+      break;
+    case '/rename':
+      await handleRename(prompt);
+      break;
+    case '/fork':
+    case '/branch':
+      await handleFork();
+      break;
+    case '/plan':
+      await handlePerm('plan');
+      break;
+    case '/perm':
+      await handlePermCmd(prompt);
+      break;
+    case '/model':
+      await handleModel(prompt);
+      break;
+    case '/status':
+      await handleStatus();
+      break;
+    case '/clear':
+      handleClear();
+      break;
+    case '/compact':
+      // Pass through to agent — CC CLI intercepts this
+      sendToAgent(prompt);
+      break;
+    case '/skills':
+      // Pass through to agent — CC SDK handles skill discovery
+      sendToAgent(prompt);
+      break;
+    default:
+      appendSystem(`未知命令: ${cmd}
+
+可用命令: /help, /agents, /mcp, /context, /usage, /info, /rename, /fork, /plan, /perm, /model, /status, /clear, /compact, /skills`);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
 // Send message
 // ══════════════════════════════════════════════════════════════
 async function sendMessage() {
@@ -241,63 +305,7 @@ async function sendMessage() {
     input.value = '';
     input.style.height = 'auto';
     appendMessage('user', prompt);
-
-    const spaceIdx = prompt.indexOf(' ');
-    const cmd = spaceIdx > 0 ? prompt.slice(0, spaceIdx) : prompt;
-
-    switch (cmd) {
-      case '/help':
-        handleHelp();
-        break;
-      case '/agents':
-        await handleAgents();
-        break;
-      case '/mcp':
-        await handleMcp();
-        break;
-      case '/context':
-        await handleContext(prompt);
-        break;
-      case '/usage':
-      case '/cost':
-        await handleUsage();
-        break;
-      case '/info':
-        await handleInfo();
-        break;
-      case '/rename':
-        await handleRename(prompt);
-        break;
-      case '/fork':
-      case '/branch':
-        await handleFork();
-        break;
-      case '/plan':
-        await handlePerm('plan');
-        break;
-      case '/perm':
-        await handlePermCmd(prompt);
-        break;
-      case '/model':
-        await handleModel(prompt);
-        break;
-      case '/status':
-        await handleStatus();
-        break;
-      case '/clear':
-        handleClear();
-        break;
-      case '/compact':
-        // Pass through to agent — CC CLI intercepts this
-        sendToAgent(prompt);
-        return;
-      case '/skills':
-        // Pass through to agent — CC SDK handles skill discovery
-        sendToAgent(prompt);
-        return;
-      default:
-        appendSystem(`未知命令: ${cmd}\n\n可用命令: /help, /agents, /mcp, /context, /usage, /info, /rename, /fork, /plan, /perm, /model, /status, /clear, /compact, /skills`);
-    }
+    await dispatchSlashCommand(prompt);
     return;
   }
 
